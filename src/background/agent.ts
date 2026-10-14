@@ -1,6 +1,6 @@
 import { buildJevRequest, validateChoiceAnswer } from '../shared/action-space';
 import { activeJevModel, callJevProvider } from '../shared/providers';
-import { createFieldContext, generateFieldText } from '../shared/text-helper';
+import { createFieldContext, generateFieldText, generateStartingUrl } from '../shared/text-helper';
 import {
   ActResult,
   AgentProgress,
@@ -74,6 +74,11 @@ function readNoul(answer: any): number | undefined {
 
 const INTERNAL_PREFIXES = ['chrome://', 'chrome-extension://', 'edge://', 'about:', 'view-source:', 'devtools://'];
 
+/** Only blank/new-tab pages may be replaced without observing their contents. */
+export function isStartingPage(url: string): boolean {
+  return /^(?:chrome:\/\/(?:newtab|new-tab-page)\/?|about:blank)(?:[?#].*)?$/.test(url);
+}
+
 const MAX_CONSECUTIVE_STALE = 4;
 /** DONE/BLOCKED below this confidence is confirmed by a second look before the run ends. */
 const TERMINAL_CONFIRM_THRESHOLD = 0.5;
@@ -104,6 +109,8 @@ export class AgentRunner {
   private tabNote: string | null = null;
   /** Trusted input via chrome.debugger; attached per run when the setting is on and permitted. */
   private input = new TrustedInput();
+  /** Avoid repeating a failed attachment on every decision in a continuous run. */
+  private inputAttemptedTab: number | null = null;
 
   constructor() {
     this.input.onCancelled = () => {
@@ -177,6 +184,7 @@ export class AgentRunner {
   private reset(goal: string, tabId: number): void {
     this.runToken++;
     this.activeTabId = tabId;
+    this.inputAttemptedTab = null;
     this.history = [];
     this.lastFingerprint = null;
     this.lastSummary = null;
@@ -206,9 +214,9 @@ export class AgentRunner {
   public async start(goal: string, tabId: number): Promise<void> {
     if (this.progress.status === 'running') return;
     this.reset(goal, tabId);
+    const token = this.runToken;
     this.broadcastUpdate();
-    await this.attachInput(tabId);
-    await this.loop(this.runToken);
+    await this.loop(token);
   }
 
   /** Executes exactly one step. A new goal, or a finished run, starts over; a paused run continues. */
@@ -220,6 +228,7 @@ export class AgentRunner {
     } else {
       this.runToken++;
       this.progress.status = 'running';
+      this.inputAttemptedTab = null;
     }
     const token = this.runToken;
 
@@ -229,7 +238,6 @@ export class AgentRunner {
     }
 
     this.broadcastUpdate();
-    await this.attachInput(tabId);
     const cont = await this.executeOneStep(token);
     if (token === this.runToken && this.progress.status === 'running') {
       this.progress.status = cont ? 'paused' : 'idle';
@@ -290,6 +298,32 @@ export class AgentRunner {
 
   private lastPingError = '';
 
+  /** Returns true when this step was a bootstrap navigation, false on a regular page. */
+  private async bootstrap(tabId: number, token: number): Promise<boolean> {
+    const tab = await chrome.tabs.get(tabId);
+    if (token !== this.runToken) return true;
+    const originalUrl = tab.pendingUrl || tab.url || '';
+    if (!isStartingPage(originalUrl)) return false;
+    const started = Date.now();
+    const url = await generateStartingUrl(this.settings, this.progress.goal);
+    if (token !== this.runToken) return true;
+    const current = await chrome.tabs.get(tabId);
+    if (token !== this.runToken) return true;
+    if ((current.pendingUrl || current.url || '') !== originalUrl) {
+      throw new Error('The tab changed while choosing a starting URL. Start a new run on the current page.');
+    }
+    await chrome.tabs.update(tabId, { url });
+    if (token !== this.runToken) return true;
+    this.progress.currentStep++;
+    this.history.push({ step: this.progress.currentStep, action: `NAVIGATE ${url}`, kind: 'navigate', url, page_changed: true, outcome: `navigated to ${url}` });
+    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'NAVIGATE', targetLabel: 'Starting URL chosen by text helper', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
+    this.broadcastUpdate();
+    await this.waitForTabToLoad(tabId);
+    if (token !== this.runToken) return true;
+    await this.ensureContentScriptReady(tabId);
+    return true;
+  }
+
   private async ping(tabId: number): Promise<boolean> {
     try {
       const res = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
@@ -335,7 +369,9 @@ export class AgentRunner {
    * A stale decision is discarded and the page is observed again without recording a step.
    */
   private async executeOneStep(token: number): Promise<boolean> {
+    if (token !== this.runToken) return false;
     await this.followTab();
+    if (token !== this.runToken) return false;
     const tabId = this.activeTabId;
     if (tabId === null) {
       this.finish('error', 'No active tab identified');
@@ -345,14 +381,19 @@ export class AgentRunner {
     // 1. Observe
     let snapshot: PageSnapshot;
     try {
+      if (await this.bootstrap(tabId, token)) return token === this.runToken;
+      if (token !== this.runToken) return false;
       await this.ensureContentScriptReady(tabId);
+      if (token !== this.runToken) return false;
+      if (this.inputAttemptedTab !== tabId) await this.attachInput(tabId);
+      if (token !== this.runToken) return false;
       const response = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_OBSERVE' });
       if (!response?.success || !response.snapshot) {
         throw new Error(response?.error || 'Failed to capture page DOM snapshot');
       }
       snapshot = response.snapshot;
     } catch (err: any) {
-      this.finish('error', `Observe failed: ${err?.message || String(err)}`);
+      if (token === this.runToken) this.finish('error', `Page startup / observe failed: ${err?.message || String(err)}`);
       return false;
     }
     if (token !== this.runToken) return false;
@@ -445,7 +486,7 @@ export class AgentRunner {
       this.decisionCount++;
       jevResponse = await callJevProvider(this.settings, request);
     } catch (err: any) {
-      this.finish('error', `Jev decision failed: ${err?.message || String(err)}`);
+      this.finish('error', `Decision failed: ${err?.message || String(err)}`);
       return false;
     }
     const latencyMs = Date.now() - started;
@@ -665,6 +706,7 @@ export class AgentRunner {
 
   /** Attaches trusted input when enabled; records why not so the trace shows which path ran. */
   private async attachInput(tabId: number): Promise<void> {
+    this.inputAttemptedTab = tabId;
     if (!this.settings.trustedInput) {
       this.progress.inputNote = 'Trusted input is off in settings; using synthetic events.';
     } else if (await this.input.attach(tabId)) {

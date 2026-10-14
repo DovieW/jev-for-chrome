@@ -2,10 +2,13 @@ import { AppSettings, JevRequest, JevResponse } from '../types';
 import { callCloudflare } from './cloudflare';
 import { callOpenRouter } from './openrouter';
 import { callTypeSafe } from './typesafe';
+import { callOpenAI } from './openai';
 
 /** The configured model id. Settings are migrated on load, so this is what the provider sends. */
 export function activeJevModel(settings: AppSettings): string {
   switch (settings.activeProvider) {
+    case 'openai':
+      return settings.openai.model;
     case 'typesafe':
       return settings.typesafe.model;
     case 'openrouter':
@@ -22,6 +25,8 @@ export async function callJevProvider(
   request: JevRequest
 ): Promise<JevResponse> {
   switch (settings.activeProvider) {
+    case 'openai':
+      return callOpenAI(settings.openai, request);
     case 'typesafe':
       return callTypeSafe(settings.typesafe, request);
     case 'openrouter':
@@ -33,5 +38,5 @@ export async function callJevProvider(
   }
 }
 
-export { callCloudflare, callOpenRouter, callTypeSafe };
+export { callCloudflare, callOpenRouter, callTypeSafe, callOpenAI };
 export { postJson } from './http';

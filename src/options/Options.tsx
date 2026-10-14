@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { callJevProvider } from '../shared/providers';
-import { describeHelperKey } from '../shared/text-helper';
+import { activeJevModel, callJevProvider } from '../shared/providers';
+import { describeHelperKey, isOfficialOpenAI } from '../shared/text-helper';
 import {
   AppSettings,
   DEFAULT_SETTINGS,
@@ -61,12 +61,7 @@ export const Options: React.FC = () => {
     setTestingStatus(`Testing ${provider.toUpperCase()} connection...`);
     try {
       const testSettings: AppSettings = { ...settings, activeProvider: provider };
-      const model =
-        provider === 'typesafe'
-          ? settings.typesafe.model
-          : provider === 'openrouter'
-          ? settings.openrouter.model
-          : settings.cloudflare.model;
+      const model = activeJevModel(testSettings);
       const started = Date.now();
       const res = await callJevProvider(testSettings, { model, ...TEST_REQUEST });
       const summary = JSON.stringify(res.answers?.operation ?? res.answers ?? res).slice(0, 120);
@@ -82,6 +77,7 @@ export const Options: React.FC = () => {
       activeProvider: settings.activeProvider,
       typesafe: { ...DEFAULT_SETTINGS.typesafe, apiKey: settings.typesafe.apiKey },
       openrouter: { ...DEFAULT_SETTINGS.openrouter, apiKey: settings.openrouter.apiKey },
+      openai: { ...DEFAULT_SETTINGS.openai, apiKey: settings.openai.apiKey },
       cloudflare: {
         ...DEFAULT_SETTINGS.cloudflare,
         accountId: settings.cloudflare.accountId,
@@ -108,15 +104,15 @@ export const Options: React.FC = () => {
             Jev for Chrome settings
           </h1>
           <p style={styles.subtitle}>
-            Configure your Jev model provider (TypeSafe.ai, OpenRouter, Cloudflare) and Text Helper.
+            Configure your decision model provider (OpenAI Decisions or TypeSafe Jev) and Text Helper.
           </p>
         </div>
 
         {/* Active Provider Selector */}
         <div style={styles.section}>
-          <label style={styles.sectionLabel}>Active Jev Provider</label>
+          <label style={styles.sectionLabel}>Active Decision Provider</label>
           <div style={styles.providerTabs}>
-            {(['openrouter', 'typesafe', 'cloudflare'] as JevProviderType[]).map((p) => (
+            {(['openrouter', 'typesafe', 'cloudflare', 'openai'] as JevProviderType[]).map((p) => (
               <button
                 key={p}
                 style={{
@@ -131,6 +127,7 @@ export const Options: React.FC = () => {
                 {p === 'openrouter' && 'OpenRouter (Decisions)'}
                 {p === 'typesafe' && 'TypeSafe.ai (Official)'}
                 {p === 'cloudflare' && 'Cloudflare Workers AI'}
+                {p === 'openai' && 'OpenAI Decisions (GPT-6 Luna)'}
               </button>
             ))}
           </div>
@@ -138,6 +135,28 @@ export const Options: React.FC = () => {
 
         {/* Provider Configuration Forms */}
         <div style={styles.providerConfigBox}>
+          {activeTab === 'openai' && (
+            <div>
+              <h3 style={styles.subhead}>OpenAI Decisions Configuration</h3>
+              <p style={styles.helpText}>GPT-6 Luna chooses actions directly through OpenAI, separately from TypeSafe Jev.</p>
+              <div style={styles.field}>
+                <label style={styles.label}>API Key</label>
+                <input type="password" style={styles.input} value={settings.openai.apiKey}
+                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, apiKey: e.target.value } })} />
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Model</label>
+                <input type="text" style={styles.input} value={settings.openai.model}
+                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, model: e.target.value } })} />
+              </div>
+              <div style={styles.field}>
+                <label style={styles.label}>Endpoint</label>
+                <input type="text" style={styles.input} value={settings.openai.endpoint}
+                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, endpoint: e.target.value } })} />
+              </div>
+              <button style={styles.btnSecondary} onClick={() => handleTestConnection('openai')}>Test OpenAI Decisions</button>
+            </div>
+          )}
           {activeTab === 'typesafe' && (
             <div>
               <h3 style={styles.subhead}>TypeSafe.ai Configuration</h3>
@@ -317,7 +336,8 @@ export const Options: React.FC = () => {
             Text Generation Helper (for TYPE_TEXT operations)
           </label>
           <p style={styles.helpText}>
-            When Jev selects an input box to fill, this lightweight LLM generates the text payload from the goal.
+            When the decision model selects an input box to fill, this lightweight LLM generates the text payload from the goal.
+            On a new or blank tab, it also chooses the starting URL.
             Changing the provider resets Base URL and Model to that provider's defaults.
           </p>
           <div style={styles.grid2}>
@@ -355,7 +375,7 @@ export const Options: React.FC = () => {
             <input
               type="password"
               style={styles.input}
-              placeholder="API Key for Text Model (optional if OpenRouter key is set)"
+              placeholder="Helper key (optional with a matching decision-provider key)"
               value={settings.textHelper.apiKey}
               onChange={(e) =>
                 setSettings({
@@ -383,6 +403,18 @@ export const Options: React.FC = () => {
               }
             />
           </div>
+
+          {isOfficialOpenAI(describeHelperKey(settings).baseUrl) && (
+            <div style={styles.field}>
+              <label style={styles.label}>OpenAI Text Processing Tier</label>
+              <select style={styles.input} value={settings.textHelper.serviceTier || 'default'}
+                onChange={(e) => setSettings({ ...settings, textHelper: { ...settings.textHelper, serviceTier: e.target.value as 'default' | 'priority' } })}>
+                <option value="default">Standard</option>
+                <option value="priority">Fast (Priority)</option>
+              </select>
+              <p style={styles.helpText}>Fast / Priority uses higher-cost processing for field text and starting-URL requests.</p>
+            </div>
+          )}
         </div>
 
         {/* Agent Execution Settings */}
@@ -519,6 +551,7 @@ const styles: Record<string, any> = {
   },
   providerTabs: {
     display: 'flex',
+    flexWrap: 'wrap',
     gap: 8,
     marginBottom: 12,
   },

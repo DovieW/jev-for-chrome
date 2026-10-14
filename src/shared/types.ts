@@ -2,8 +2,14 @@
  * Core type definitions for Jev for Chrome
  */
 
-export type JevProviderType = 'typesafe' | 'openrouter' | 'cloudflare';
+export type JevProviderType = 'typesafe' | 'openrouter' | 'cloudflare' | 'openai';
 export type TextHelperProvider = 'openrouter' | 'deepseek' | 'openai';
+
+export interface OpenAIConfig {
+  apiKey: string;
+  model: string;
+  endpoint: string;
+}
 
 export interface TypeSafeConfig {
   apiKey: string;
@@ -29,13 +35,15 @@ export interface TextHelperConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** Only sent to the official OpenAI text endpoint. */
+  serviceTier?: 'default' | 'priority';
 }
 
 /** Defaults applied when the text helper's base URL or model is left empty. */
 export const TEXT_HELPER_PRESETS: Record<TextHelperProvider, { baseUrl: string; model: string }> = {
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1', model: 'deepseek/deepseek-chat' },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-6-luna' },
 };
 
 export interface AppSettings {
@@ -43,6 +51,7 @@ export interface AppSettings {
   typesafe: TypeSafeConfig;
   openrouter: OpenRouterConfig;
   cloudflare: CloudflareConfig;
+  openai: OpenAIConfig;
   textHelper: TextHelperConfig;
   maxSteps: number;
   stepDelayMs: number;
@@ -73,11 +82,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
     apiToken: '',
     model: 'typesafe/jev',
   },
+  openai: {
+    apiKey: '',
+    model: 'gpt-6-luna',
+    endpoint: 'https://api.openai.com/v1/decisions',
+  },
   textHelper: {
     provider: 'openrouter',
     apiKey: '',
     baseUrl: TEXT_HELPER_PRESETS.openrouter.baseUrl,
     model: TEXT_HELPER_PRESETS.openrouter.model,
+    serviceTier: 'default',
   },
   maxSteps: 30,
   stepDelayMs: 300,
@@ -111,6 +126,7 @@ export function mergeSettings(stored: Partial<AppSettings> | undefined | null): 
     typesafe: { ...DEFAULT_SETTINGS.typesafe, ...(s.typesafe || {}) },
     openrouter: { ...DEFAULT_SETTINGS.openrouter, ...(s.openrouter || {}) },
     cloudflare: { ...DEFAULT_SETTINGS.cloudflare, ...(s.cloudflare || {}) },
+    openai: { ...DEFAULT_SETTINGS.openai, ...(s.openai || {}) },
     textHelper: { ...DEFAULT_SETTINGS.textHelper, ...(s.textHelper || {}) },
   };
 
@@ -121,8 +137,11 @@ export function mergeSettings(stored: Partial<AppSettings> | undefined | null): 
   if (!(merged.typesafe.model || '').trim()) merged.typesafe.model = DEFAULT_SETTINGS.typesafe.model;
   if (!(merged.typesafe.endpoint || '').trim()) merged.typesafe.endpoint = DEFAULT_SETTINGS.typesafe.endpoint;
   if (!(merged.cloudflare.model || '').trim()) merged.cloudflare.model = DEFAULT_SETTINGS.cloudflare.model;
+  if (!(merged.openai.model || '').trim()) merged.openai.model = DEFAULT_SETTINGS.openai.model;
+  if (!(merged.openai.endpoint || '').trim()) merged.openai.endpoint = DEFAULT_SETTINGS.openai.endpoint;
 
   const helper = merged.textHelper;
+  if (helper.serviceTier !== 'priority') helper.serviceTier = 'default';
   if (!TEXT_HELPER_PRESETS[helper.provider]) helper.provider = DEFAULT_SETTINGS.textHelper.provider;
   const preset = TEXT_HELPER_PRESETS[helper.provider];
   if (!(helper.baseUrl || '').trim()) helper.baseUrl = preset.baseUrl;

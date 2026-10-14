@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentRunner } from '../src/background/agent';
 import { callJevProvider } from '../src/shared/providers';
-import { generateFieldText } from '../src/shared/text-helper';
+import { generateFieldText, generateStartingUrl } from '../src/shared/text-helper';
 import { ActResult, ChoiceQuestion, DEFAULT_SETTINGS, PageAction, PageSnapshot } from '../src/shared/types';
 
 vi.mock('../src/shared/providers', () => ({
@@ -11,10 +11,12 @@ vi.mock('../src/shared/providers', () => ({
 vi.mock('../src/shared/text-helper', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/shared/text-helper')>()),
   generateFieldText: vi.fn(),
+  generateStartingUrl: vi.fn(),
 }));
 
 const jev = vi.mocked(callJevProvider);
 const textHelper = vi.mocked(generateFieldText);
+const startingUrl = vi.mocked(generateStartingUrl);
 
 function snapshot(overrides: Partial<PageSnapshot> = {}): PageSnapshot {
   const actions: PageAction[] = [
@@ -82,7 +84,7 @@ function installChrome(page: Page) {
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
       onCreated: { addListener: vi.fn((fn: any) => { created.push(fn); }) },
       onRemoved: { addListener: vi.fn((fn: any) => { removed.push(fn); }) },
-      update: vi.fn(async () => ({})),
+      update: vi.fn(async (_id: number, _changes: chrome.tabs.UpdateProperties) => ({})),
       query: vi.fn(),
     },
     scripting: { executeScript: vi.fn() },
@@ -675,5 +677,138 @@ describe('trusted input (chrome.debugger)', () => {
 
     expect(page.sent.filter((m) => m.type === 'CONTENT_ACT')).toHaveLength(1);
     expect(r.getProgress().inputNote).toMatch(/Could not attach/);
+  });
+});
+
+describe('new-tab startup', () => {
+  let page: Page;
+  let browser: ReturnType<typeof installChrome>;
+  let url: string;
+  beforeEach(() => {
+    jev.mockReset();
+    startingUrl.mockReset();
+    page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    browser = installChrome(page);
+    url = 'chrome://newtab/';
+    browser.tabs.get.mockImplementation(async () => ({ id: 7, url, status: 'complete' }));
+    browser.tabs.update.mockImplementation(async (_id: number, changes: any) => { url = changes.url; return {} as any; });
+    startingUrl.mockResolvedValue('https://example.com/');
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('Run navigates first, records the extra step, and continues with decisions', async () => {
+    jev.mockResolvedValue(answer('DONE', { goal_done: { probability: 1 } }));
+    const r = runner();
+    await r.start('Find flights', 7);
+    expect(startingUrl).toHaveBeenCalledOnce();
+    expect(browser.tabs.update).toHaveBeenCalledWith(7, { url: 'https://example.com/' });
+    expect(r.getProgress().status).toBe('done');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(r.getProgress().logs.at(-1)).toMatchObject({ operation: 'NAVIGATE', targetValue: 'https://example.com/' });
+    expect(jev.mock.calls[0][1].state.recent_actions[0]).toMatchObject({ kind: 'navigate', page_changed: true });
+  });
+
+  it.each(['chrome://newtab/', 'chrome://new-tab-page/', 'about:blank'])('Step bootstraps %s, then resumes normally', async (startingPage) => {
+    url = startingPage;
+    const r = runner();
+    await r.step('Find flights', 7);
+    expect(r.getProgress().status).toBe('paused');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(jev).not.toHaveBeenCalled();
+    jev.mockResolvedValue(answer('DONE'));
+    await r.step('Find flights', 7);
+    expect(r.getProgress().status).toBe('done');
+    expect(startingUrl).toHaveBeenCalledOnce();
+  });
+
+  it('does not bootstrap an ordinary page', async () => {
+    url = 'https://example.com/';
+    jev.mockResolvedValue(answer('DONE'));
+    await runner().start('Find flights', 7);
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it.each(['chrome://settings/', 'chrome://extensions/', 'chrome-extension://other/options.html'])('refuses %s before debugger attachment', async (internal) => {
+    url = internal;
+    const attach = vi.fn();
+    vi.stubGlobal('chrome', { ...browser, debugger: { attach, onDetach: { addListener: vi.fn() } } });
+    const r = runner();
+    await r.start('Find flights', 7);
+    expect(r.getProgress().status).toBe('error');
+    expect(r.getProgress().inputNote).toBeUndefined();
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it.each(['No API key', 'Starting URL helper returned invalid JSON'])('leaves the tab unchanged on helper failure: %s', async (message) => {
+    startingUrl.mockRejectedValueOnce(new Error(message));
+    const r = runner();
+    await r.start('Find flights', 7);
+    expect(r.getProgress().lastError).toContain(message);
+    expect(r.getProgress().status).toBe('error');
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(jev).not.toHaveBeenCalled();
+  });
+
+  it('reports a navigation failure without attaching input or making a decision', async () => {
+    browser.tabs.update.mockRejectedValueOnce(new Error('Tab closed'));
+    const r = runner();
+    await r.start('Find flights', 7);
+    expect(r.getProgress().status).toBe('error');
+    expect(r.getProgress().lastError).toContain('Tab closed');
+    expect(r.getProgress().inputNote).toBeUndefined();
+    expect(jev).not.toHaveBeenCalled();
+  });
+
+  it.each(['stop', 'manual navigation'] as const)('does not navigate after %s while the helper is pending', async (action) => {
+    let complete!: (value: string) => void;
+    startingUrl.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const r = runner();
+    const run = r.start('Find flights', 7);
+    await vi.waitFor(() => expect(startingUrl).toHaveBeenCalledOnce());
+    if (action === 'stop') r.stop();
+    else url = 'https://another.example/';
+    complete('https://example.com/');
+    await run;
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(jev).not.toHaveBeenCalled();
+    expect(r.getProgress().status).toBe(action === 'stop' ? 'idle' : 'error');
+  });
+
+  it('does not let a stopped bootstrap error change the stopped status', async () => {
+    let fail!: (error: Error) => void;
+    startingUrl.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const r = runner();
+    const run = r.start('Find flights', 7);
+    await vi.waitFor(() => expect(startingUrl).toHaveBeenCalledOnce());
+    r.stop();
+    fail(new Error('Delayed request failure'));
+    await run;
+    expect(r.getProgress().status).toBe('idle');
+    expect(r.getProgress().lastError).toBeUndefined();
+  });
+
+  it('does not request a starting URL when stopped during the initial tab lookup', async () => {
+    let complete!: (value: any) => void;
+    browser.tabs.get.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const r = runner();
+    const run = r.start('Find flights', 7);
+    await vi.waitFor(() => expect(browser.tabs.get).toHaveBeenCalled());
+    r.stop();
+    complete({ id: 7, url, status: 'complete' });
+    await run;
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(r.getProgress().status).toBe('idle');
+  });
+
+  it('counts bootstrap navigation against the step budget', async () => {
+    const r = runner();
+    r.setSettings({ ...DEFAULT_SETTINGS, maxSteps: 1, stepDelayMs: 0 });
+    await r.start('Find flights', 7);
+    expect(r.getProgress().status).toBe('blocked');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(jev).not.toHaveBeenCalled();
   });
 });

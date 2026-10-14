@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createFieldContext, generateFieldText, parseFieldText } from '../src/shared/text-helper';
-import { AppSettings, DEFAULT_SETTINGS, PageAction } from '../src/shared/types';
+import { createFieldContext, generateFieldText, generateStartingUrl, describeHelperKey, parseFieldText } from '../src/shared/text-helper';
+import { AppSettings, DEFAULT_SETTINGS, mergeSettings, PageAction, TEXT_HELPER_PRESETS } from '../src/shared/types';
 
 const okResponse = (content: string) => ({
   ok: true,
@@ -144,7 +144,7 @@ describe('describeHelperKey', () => {
     expect(describeHelperKey({ ...base, textHelper: { ...base.textHelper, apiKey: 'own' } }).source).toBe('helper');
     const deepseek = describeHelperKey({ ...base, textHelper: { provider: 'deepseek', apiKey: '', baseUrl: '', model: '' } });
     expect(deepseek.source).toBeNull();
-    expect(deepseek.message).toMatch(/set to "deepseek".*api\.deepseek\.com.*only shared for OpenRouter/);
+    expect(deepseek.message).toMatch(/set to "deepseek".*api\.deepseek\.com.*Enter a helper key/);
     const noKeys = describeHelperKey(DEFAULT_SETTINGS);
     expect(noKeys.source).toBeNull();
     expect(noKeys.message).toMatch(/Enter an OpenRouter key/);
@@ -154,6 +154,78 @@ describe('describeHelperKey', () => {
     const settings: AppSettings = { ...DEFAULT_SETTINGS, textHelper: { provider: 'openai', apiKey: '', baseUrl: '', model: '' } };
     await expect(
       generateFieldText(settings, { goal: 'g', field: {}, page: { title: '', text: '' }, recent_actions: [] })
-    ).rejects.toThrow(/set to "openai".*api\.openai\.com.*only shared for OpenRouter/);
+    ).rejects.toThrow(/set to "openai".*api\.openai\.com.*OpenAI Decisions key/);
+  });
+});
+
+describe('OpenAI text helper and starting URL', () => {
+  const context = { goal: 'Search for flights', field: {}, page: { title: '', text: '' }, recent_actions: [] };
+  const settings = (tier: 'default' | 'priority' = 'default'): AppSettings => ({
+    ...DEFAULT_SETTINGS,
+    openai: { ...DEFAULT_SETTINGS.openai, apiKey: 'test-openai' },
+    textHelper: { provider: 'openai', apiKey: '', baseUrl: '', model: '', serviceTier: tier },
+  });
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['default', 'priority'] as const)('uses Luna and the %s tier without max_tokens', async (tier) => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse('{"text":"Miami"}') as Response);
+    expect(await generateFieldText(settings(tier), context)).toBe('Miami');
+    const [url, options] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe('https://api.openai.com/v1/chat/completions');
+    expect(options?.headers).toMatchObject({ Authorization: 'Bearer test-openai' });
+    const body = JSON.parse(options!.body as string);
+    expect(body).toMatchObject({ model: 'gpt-6-luna', max_completion_tokens: 1024, reasoning_effort: 'none', service_tier: tier });
+    expect(body).not.toHaveProperty('max_tokens');
+    expect(describeHelperKey(settings(tier)).source).toBe('openai');
+  });
+
+  it('prefers the helper key and never shares the OpenAI key with a custom host', async () => {
+    const own = settings();
+    own.textHelper.apiKey = 'own-key';
+    expect(describeHelperKey(own).source).toBe('helper');
+    for (const baseUrl of ['https://api.openai.com.evil.test/v1', 'http://api.openai.com/v1', 'https://gateway.test/v1', 'https://api.openai.com:8443/v1']) {
+      const custom = settings();
+      custom.textHelper.baseUrl = baseUrl;
+      expect(describeHelperKey(custom).source).toBeNull();
+      await expect(generateFieldText(custom, context)).rejects.toThrow(/key/);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps legacy request parameters for a compatible endpoint', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse('{"text":"Miami"}') as Response);
+    const custom = settings('priority');
+    custom.textHelper.baseUrl = 'https://gateway.test/v1';
+    custom.textHelper.apiKey = 'custom-key';
+    await generateFieldText(custom, context);
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.max_tokens).toBe(1024);
+    expect(body).not.toHaveProperty('max_completion_tokens');
+    expect(body).not.toHaveProperty('service_tier');
+    expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('migrates older settings without replacing saved models or provider choices', () => {
+    expect(TEXT_HELPER_PRESETS.openai.model).toBe('gpt-6-luna');
+    const old = mergeSettings({ activeProvider: 'typesafe', textHelper: { provider: 'openai', apiKey: '', baseUrl: '', model: 'gpt-4o-mini' } });
+    expect(old.activeProvider).toBe('typesafe');
+    expect(old.textHelper.model).toBe('gpt-4o-mini');
+    expect(old.textHelper.serviceTier).toBe('default');
+    expect(old.openai).toEqual(DEFAULT_SETTINGS.openai);
+    expect(mergeSettings({ textHelper: { provider: 'openai', apiKey: '', baseUrl: '', model: '' } }).textHelper.model).toBe('gpt-6-luna');
+  });
+
+  it('chooses an absolute starting URL using the same text configuration', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse('{"url":"https://www.google.com"}') as Response);
+    expect(await generateStartingUrl(settings('priority'), 'Find a flight')).toBe('https://www.google.com/');
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body.service_tier).toBe('priority');
+    expect(JSON.parse(body.messages[1].content)).toEqual({ goal: 'Find a flight' });
+  });
+
+  it.each(['not JSON', '{"url":null}', '{"url":"/relative"}', '{"url":"javascript:alert(1)"}', '{"url":"chrome://settings"}', '{"url":"https://user:pass@example.com"}', '{"url":"https://example.com","extra":true}', '["https://example.com"]'])('refuses unsafe or malformed URL output: %s', async (raw) => {
+    vi.mocked(fetch).mockResolvedValueOnce(okResponse(raw) as Response);
+    await expect(generateStartingUrl(settings(), 'Find a flight')).rejects.toThrow();
   });
 });

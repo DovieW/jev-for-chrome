@@ -11,6 +11,8 @@
 
 一个直接驱动你当前标签页的 Chrome 扩展，决策模型是 [TypeSafe Jev](https://typesafe.ai)：它不生成文本，几百毫秒内直接选出下一步该点哪、该在哪输入、该选哪个下拉项。本项目是 [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) 的 Manifest V3 移植：同样的观察格式、同样的问题、同样的执行规则。社区项目，与 TypeSafe 和 Browser Use 均无隶属关系。
 
+也可以选择 **OpenAI Decisions（GPT-6 Luna）**，通过 OpenAI 直接选择动作，复用同一套浏览器观察和执行循环。
+
 [English](README.md) | [简体中文](README_CN.md)
 
 ![Google Flights 单程苏黎世到伦敦 2026-09-20，由扩展在 headless Chromium 里以真实速度完成](docs/demo.gif)
@@ -105,15 +107,20 @@ npm run build
 
 打开扩展的选项页。
 
-**Jev 渠道**（三选一）：
+**决策渠道**（任选一个，默认仍为 OpenRouter）：
 
 | 渠道 | 端点 | 模型 |
 |---|---|---|
 | OpenRouter | `https://openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` |
 | TypeSafe.ai | `https://api.typesafe.ai/v1/systemone` | `jev-latest` |
 | Cloudflare Workers AI | `https://api.cloudflare.com/client/v4/accounts/{id}/ai/run` | `typesafe/jev` |
+| OpenAI Decisions | `https://api.openai.com/v1/decisions` | `gpt-6-luna` |
 
-**文本助手**（只在 `TYPE_TEXT` 时用到）：OpenRouter、DeepSeek 直连，或任意 OpenAI 兼容 Base URL。切换渠道会自动填入该渠道的默认 Base URL 和模型。如果助手走 OpenRouter 且已经填了 OpenRouter key，助手的 key 可以留空。
+**文本助手**（填写字段和选择新标签页的起始网址）：OpenRouter、DeepSeek 直连、OpenAI，或任意 OpenAI 兼容 Base URL。选择 OpenAI 时默认填入 `gpt-6-luna`，已保存的模型不会被覆盖。使用 OpenRouter 或 OpenAI 官方端点时，如果已经填写相应决策渠道的 key，助手 key 可以留空；自定义端点需要单独的助手 key。
+
+OpenAI 官方文本请求支持 **Standard**（默认）或 **Fast (Priority)**。Priority 更快，费用也更高；该设置同时用于字段文本和起始网址请求。OpenAI 使用 `max_completion_tokens`，Luna 的短文本请求关闭推理。
+
+[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) 与 TypeSafe Jev 是不同的决策模型。适配器发送具名选择题和判断题，转换概率分布，在执行动作前拒绝格式错误或被拒绝的回答。只有一个候选目标时由代码直接选择。
 
 **运行参数**：每次运行的最大步数、步间延迟、是否在页面上画编号徽章。
 
@@ -123,19 +130,21 @@ npm run build
 
 点工具栏图标，输入目标，按 **Run**。**Step** 只执行一步，方便逐步观察决策；**Stop** 中止。页面上会给模型能看到的元素画编号徽章，底部有一条状态栏显示当前动作和延迟。
 
+在 Chrome 新标签页或 `about:blank` 启动时，文本助手先根据目标选择一个 HTTP(S) 起始网址，扩展在同一标签页导航后才读取页面或连接调试器。这计为一个 `NAVIGATE` 步骤：**Step** 导航后暂停，**Run** 自动继续。缺少助手 key 或网址无效时不会更改标签页。其他浏览器内部页面仍不支持。
+
 运行会在以下情况停止：模型给出 `DONE` 或 `BLOCKED`、连续三个动作都没有改变页面、步数预算用完、任何渠道报错。置信度低于 50% 的 `DONE`/`BLOCKED` 会等页面稳定后再问一次，重复才算数。目标被遮挡、或文本模型无法从目标里推出该填什么，会反馈给模型，两次之后该目标不再提供。`DONE` 是模型的判断，不是证明，请自己看一眼页面。
 
 ## 哪些数据会离开你的浏览器
 
 完整声明见 [docs/PRIVACY.md](docs/PRIVACY.md)（英文）。
 
-每一步向你选择的 Jev 渠道（OpenRouter、TypeSafe 或 Cloudflare）发一个请求，内容是：你的目标、当前标签页的 URL、标题和可见文本（最多 6,000 字符）、可交互元素表（标签、当前值、链接目标）、最近十个动作。模型决定打字时，会向文本模型发一个请求，内容是目标、字段和同样的页面文本。不会发往任何别的地方，没有遥测。API key 只存在你本机的 `chrome.storage.local`。密码框永远不读不填，`chrome://` 页面会被拒绝。申请 `<all_urls>` 权限是因为扩展必须读取你指定的那个标签页；没有开始运行的标签页上它什么都不做。`debugger` 权限只用来通过 DevTools 协议向运行中的标签页发送点击和按键；运行期间 Chrome 会在该标签页顶部显示"已开始调试"横幅，不会通过它读取任何内容。
+每一步向你选择的决策渠道（OpenRouter、TypeSafe、Cloudflare 或 OpenAI Decisions）发一个请求，内容是：你的目标、当前标签页的 URL、标题和可见文本（最多 6,000 字符）、可交互元素表（标签、当前值、链接目标）、最近十个动作。模型决定打字时，会向文本模型发一个请求，内容是目标、字段和同样的页面文本。新标签页或空白页的起始网址请求只向文本助手发送目标。不会发往任何别的地方，没有遥测。API key 只存在你本机的 `chrome.storage.local`。密码框永远不读不填，`chrome://` 页面会被拒绝。申请 `<all_urls>` 权限是因为扩展必须读取你指定的那个标签页；没有开始运行的标签页上它什么都不做。`debugger` 权限只用来通过 DevTools 协议向运行中的标签页发送点击和按键；运行期间 Chrome 会在该标签页顶部显示"已开始调试"横幅，不会通过它读取任何内容。
 
 ## 能处理和不能处理的
 
 能处理：链接、按钮、文本输入框、textarea、contenteditable、原生 `<select>`、真正渲染出来的复选框和单选框、ARIA 角色（`button`、`link`、`combobox`、`option`、`tab`、`menuitem` 等）、自动补全列表、页内和跨页导航、滚动，以及会打开新标签页的链接：agent 会跟进自己点开的新标签页继续执行，该标签页被关闭时退回原来的标签页。
 
-不能处理：shadow root 和 iframe 里的元素、canvas 界面、文件上传、拖拽、纯键盘控件，以及通过 label 做样式、本身被隐藏的原生复选框和单选框（模型看不到它们）。密码框永远不观察也不填写。`chrome://` 内部页面会被拒绝。商品卡片内部悬停才出现的浮层会被穿透点击；对话框或整页遮罩下面的元素不会。悬停才展开的菜单在可信输入下能打开，因为指针真的移过去了。
+不能处理：shadow root 和 iframe 里的元素、canvas 界面、文件上传、拖拽、纯键盘控件，以及通过 label 做样式、本身被隐藏的原生复选框和单选框（模型看不到它们）。密码框永远不观察也不填写。`chrome://` 内部页面会被拒绝，新标签页会先导航到普通网页再观察。商品卡片内部悬停才出现的浮层会被穿透点击；对话框或整页遮罩下面的元素不会。悬停才展开的菜单在可信输入下能打开，因为指针真的移过去了。
 
 策略和边界与参考实现一致；在两个网站上跑通不代表普遍可靠。
 
@@ -153,6 +162,7 @@ npm run build
 npm run check      # 类型检查 + 单元测试 + 生产构建
 npm test           # vitest
 npm run typecheck
+npm run e2e:providers  # 构建好的扩展，模拟 OpenAI API 和本地网页
 ```
 
 测试覆盖动作空间与答案校验、渠道适配器与重试策略、文本助手解析、DOM 快照分类、内容脚本启动守卫、页内执行器（jsdom）和 agent 循环（mock `chrome`），不会调用任何付费 API。设置 `OPENROUTER_API_KEY` 后 `scripts/test_live_e2e.ts` 会发两个真实请求。
@@ -178,7 +188,7 @@ src/
   content/overlay.ts         徽章和状态栏
   shared/action-space.ts     元素表，Jev 问题，严格答案校验
   shared/text-helper.ts      TYPE_TEXT 取值
-  shared/providers/          TypeSafe、OpenRouter、Cloudflare 适配器
+  shared/providers/          TypeSafe、OpenRouter、Cloudflare、OpenAI 适配器
   popup/, options/           React 界面
 public/manifest.json         MV3 manifest（构建时复制到 dist/）
 ```

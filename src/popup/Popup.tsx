@@ -122,6 +122,7 @@ export const Popup: React.FC = () => {
     typesafe: 'TypeSafe.ai (Native)',
     openrouter: 'OpenRouter (Alpha)',
     cloudflare: 'Cloudflare AI',
+    openai: 'OpenAI Decisions (Luna)',
   }[settings.activeProvider];
 
   const quickGoals = [
@@ -281,7 +282,7 @@ export const Popup: React.FC = () => {
                 )}
                 {log.targetValue && (
                   <div style={styles.textValueRow}>
-                    Typed: <code>"{log.targetValue}"</code>
+                    {log.operation === 'NAVIGATE' ? 'URL' : 'Typed'}: <code>"{log.targetValue}"</code>
                   </div>
                 )}
                 {log.confidence !== undefined && (

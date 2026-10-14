@@ -11,6 +11,8 @@
 
 A Chrome extension that drives the tab you are looking at with [TypeSafe Jev](https://typesafe.ai), a decision model that picks the next click, keystroke or dropdown value in a few hundred milliseconds instead of generating text. It is a Manifest V3 port of [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast): same observation format, same questions, same execution rules. Community project, not affiliated with TypeSafe or Browser Use.
 
+You can also select **OpenAI Decisions (GPT-6 Luna)** to choose actions directly through OpenAI, using the same browser observation and execution loop.
+
 [English](README.md) | [简体中文](README_CN.md)
 
 ![Google Flights, one-way Zurich to London on September 20 2026, driven by the extension in headless Chromium at real speed](docs/demo.gif)
@@ -105,15 +107,20 @@ Then load the `dist/` folder the same way.
 
 Open the extension's Options page.
 
-**Jev provider** (pick one):
+**Decision provider** (pick one; OpenRouter remains the default):
 
 | Provider | Endpoint | Model |
 |---|---|---|
 | OpenRouter | `https://openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` |
 | TypeSafe.ai | `https://api.typesafe.ai/v1/systemone` | `jev-latest` |
 | Cloudflare Workers AI | `https://api.cloudflare.com/client/v4/accounts/{id}/ai/run` | `typesafe/jev` |
+| OpenAI Decisions | `https://api.openai.com/v1/decisions` | `gpt-6-luna` |
 
-**Text helper** (only used for `TYPE_TEXT`): OpenRouter, DeepSeek direct, or any OpenAI-compatible base URL. Switching the provider fills in its default base URL and model. If the helper runs through OpenRouter and you already entered an OpenRouter key, you can leave the helper key empty.
+**Text helper** (field text and new-tab starting URLs): OpenRouter, DeepSeek direct, OpenAI, or any OpenAI-compatible base URL. Selecting OpenAI fills in `gpt-6-luna`; explicitly saved models are preserved. If the helper uses OpenRouter or the official OpenAI endpoint, its key can be left empty when the matching decision-provider key is set. Custom endpoints require their own helper key.
+
+For official OpenAI text requests, choose **Standard** (default) or **Fast (Priority)** processing. Priority is faster and costs more; the setting applies to field text and starting URLs. OpenAI requests use `max_completion_tokens`; Luna text requests disable reasoning for these short outputs.
+
+The [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) is a separate decision model from TypeSafe Jev. The adapter sends named choice and predicate questions, translates the answer distributions, and rejects malformed or refused answers before acting. A target with only one candidate is selected locally.
 
 **Runtime**: max steps per run, delay between steps, and whether to draw the numbered badges on the page.
 
@@ -123,19 +130,21 @@ The **Test** button on each provider sends a tiny real request and shows the ans
 
 Click the toolbar icon, type a goal, press **Run**. **Step** executes exactly one action so you can watch decisions one at a time; **Stop** aborts. The page shows numbered badges on the elements the model can see and a small status bar with the current action and its latency.
 
+On a Chrome new-tab page or `about:blank`, the text helper first chooses an HTTP(S) starting URL from your goal. The extension navigates the same tab before reading the page or attaching the debugger. This counts as one `NAVIGATE` step: **Step** navigates and pauses; **Run** continues automatically. Missing helper keys or invalid URLs leave the tab unchanged. Other internal browser pages remain unsupported.
+
 Runs stop on `DONE`, on `BLOCKED`, after three consecutive actions that changed nothing on the page, when the step budget is exhausted, or on any provider error. A `DONE` or `BLOCKED` given with less than 50% confidence is asked once more after the page settles before it counts. A target that turns out to be covered, or a field the text model cannot fill from the goal, is reported back to the model and withheld after two attempts. `DONE` is the model's opinion, not proof; check the page.
 
 ## What leaves your browser
 
 The full statement is in [docs/PRIVACY.md](docs/PRIVACY.md).
 
-Each step sends one request to the Jev provider you chose (OpenRouter, TypeSafe or Cloudflare) containing: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the table of interactive elements with their labels, current values and link targets, and the last ten actions. When the model decides to type, one request goes to the text model with the goal, the field and the same page text. Nothing is sent anywhere else; there is no telemetry. API keys stay in `chrome.storage.local` on your machine. Password fields are never read or filled, and `chrome://` pages are refused. The `<all_urls>` permission exists because the extension has to read the tab you point it at; it does nothing on tabs where you have not started a run. The `debugger` permission is used only to send clicks and keystrokes to the run's tab through the DevTools protocol; Chrome shows a "started debugging" bar on that tab while a run is active, and nothing is read through it.
+Each step sends one request to the decision provider you chose (OpenRouter, TypeSafe, Cloudflare or OpenAI Decisions) containing: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the table of interactive elements with their labels, current values and link targets, and the last ten actions. When the model decides to type, one request goes to the text model with the goal, the field and the same page text. On a new or blank tab, the starting-URL request sends only your goal to the text helper. Nothing is sent anywhere else; there is no telemetry. API keys stay in `chrome.storage.local` on your machine. Password fields are never read or filled, and `chrome://` pages are refused. The `<all_urls>` permission exists because the extension has to read the tab you point it at; it does nothing on tabs where you have not started a run. The `debugger` permission is used only to send clicks and keystrokes to the run's tab through the DevTools protocol; Chrome shows a "started debugging" bar on that tab while a run is active, and nothing is read through it.
 
 ## What is and isn't handled
 
 Works: links, buttons, text inputs, textareas, contenteditable, native `<select>`, checkboxes and radios that are actually rendered, ARIA roles (`button`, `link`, `combobox`, `option`, `tab`, `menuitem`, ...), autocomplete lists, in-page and cross-page navigation, scrolling, and links that open a new tab: the agent follows the tab its click opened, continues there, and returns to the opener if that tab is closed.
 
-Not handled: elements inside shadow roots or iframes, canvas UIs, file uploads, drag and drop, keyboard-only widgets, and natively hidden checkboxes/radios styled through their label (the model cannot see them). Password fields are never observed or filled. Internal `chrome://` pages are refused. Hover-only layers inside a product card are clicked through; anything under a dialog or page-wide overlay is not. Hover-only menus open under trusted input, since the pointer really moves there.
+Not handled: elements inside shadow roots or iframes, canvas UIs, file uploads, drag and drop, keyboard-only widgets, and natively hidden checkboxes/radios styled through their label (the model cannot see them). Password fields are never observed or filled. Internal `chrome://` pages are refused, except new-tab pages which are navigated to a regular page before observation. Hover-only layers inside a product card are clicked through; anything under a dialog or page-wide overlay is not. Hover-only menus open under trusted input, since the pointer really moves there.
 
 Same policy and same boundaries as the reference implementation; two websites do not prove general reliability.
 
@@ -153,6 +162,7 @@ What comes next, including an MCP server so other agents can use Jev as their ex
 npm run check      # typecheck + unit tests + production build
 npm test           # vitest
 npm run typecheck
+npm run e2e:providers  # built extension, mocked OpenAI APIs and local pages
 ```
 
 Tests cover the action space and answer validation, provider adapters and retry policy, the text helper parser, DOM snapshot classification, the content script boot guard, the in-page executor (jsdom) and the agent loop (mocked `chrome`). They never call a paid API. `scripts/test_live_e2e.ts` runs two real requests when `OPENROUTER_API_KEY` is set.
@@ -178,7 +188,7 @@ src/
   content/overlay.ts         badges and status bar
   shared/action-space.ts     element table, Jev questions, strict answer validation
   shared/text-helper.ts      TYPE_TEXT value generation
-  shared/providers/          TypeSafe, OpenRouter, Cloudflare adapters
+  shared/providers/          TypeSafe, OpenRouter, Cloudflare, OpenAI adapters
   popup/, options/           React UI
 public/manifest.json         MV3 manifest (copied into dist/)
 ```
