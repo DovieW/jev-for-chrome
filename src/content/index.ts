@@ -34,7 +34,7 @@ if (!previous || !previous.alive()) {
 }
 
 function boot(): void {
-  let showOverlay = true;
+  let showOverlay = false;
 
   try {
     chrome.storage.local.get(['jev_settings'], (result) => {

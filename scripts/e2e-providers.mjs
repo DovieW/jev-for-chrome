@@ -153,8 +153,9 @@ try {
   await options.getByRole('tab', { name: 'Behavior', exact: true }).click();
   await options.getByLabel('Delay between steps (ms)', { exact: true }).fill('0');
   const labels = options.getByRole('switch', { name: 'Page labels', exact: true });
-  await labels.click();
   assert.equal(await labels.getAttribute('aria-checked'), 'false');
+  await labels.click();
+  assert.equal(await labels.getAttribute('aria-checked'), 'true');
   await labels.click();
   await options.getByRole('button', { name: 'Save changes', exact: true }).click();
   await poll(() => worker.evaluate(async () => (await chrome.storage.local.get('jev_settings')).jev_settings), (s) => s?.activeProvider === 'openai' && s?.textHelper.serviceTier === 'priority' && s?.stepDelayMs === 0);
@@ -204,6 +205,7 @@ try {
   state = await poll(progress, (p) => p.status === 'paused' && p.currentStep === 2 || p.status === 'error');
   assert.equal(state.status, 'paused', state.lastError);
   assert.equal(await step.page.inputValue('input[name=q]'), 'blue widgets');
+  assert.equal(await step.page.locator('.__jev_badge').count(), 0, 'Page labels are off by default');
   await step.popup.getByRole('button', { name: /Step/ }).click();
   state = await poll(progress, (p) => p.status === 'done' || p.status === 'error');
   assert.equal(state.status, 'done', state.lastError);
