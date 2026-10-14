@@ -78,6 +78,8 @@ function problemSummary(message: string): string {
     return "Add an API key in Settings to start this task.";
   if (/internal browser page/i.test(message))
     return "Open a regular web page, then try again.";
+  if (/TypeSafe.*context limit/i.test(message))
+    return "This page is too large for TypeSafe. Try a simpler page or change the decision provider in Settings.";
   if (/HTTP 429/i.test(message))
     return "Your provider is rate limiting requests. Try again shortly.";
   if (/HTTP (401|403)/i.test(message))

@@ -1,8 +1,9 @@
+import { buildJevRequest } from '../src/shared/action-space';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { callCloudflare } from '../src/shared/providers/cloudflare';
 import { callJevProvider } from '../src/shared/providers/index';
 import { callOpenRouter } from '../src/shared/providers/openrouter';
-import { callTypeSafe } from '../src/shared/providers/typesafe';
+import { callTypeSafe, compactTypeSafeRequest } from '../src/shared/providers/typesafe';
 import { AppSettings, DEFAULT_SETTINGS, JevRequest } from '../src/shared/types';
 
 const dummyRequest: JevRequest = {
@@ -278,5 +279,80 @@ describe('OpenRouter unknown-model error', () => {
     await expect(
       callOpenRouter({ apiKey: 'k', model: 'typesafe/jev-latest', endpoint: '' }, dummyRequest)
     ).rejects.toThrow(/set it to "typesafe\/jev-1.13"/);
+  });
+});
+
+
+describe('TypeSafe context limits', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+  afterEach(() => vi.restoreAllMocks());
+  const config = { apiKey: 'dummy', model: 'jev-latest', endpoint: 'https://example.com' };
+  const denseRequest = () => buildJevRequest('jev-latest', {
+    url: 'https://example.com/inbox', title: 'Inbox', text: 'message '.repeat(750),
+    w: 1200, h: 900, omitted_actions: 0, scroll: { y: 0, height: 900 },
+    actions: Array.from({ length: 250 }, (_, i) => ({
+      id: `e${i}`, node: i, kind: 'click' as const,
+      label: `Message ${i} ` + 'long email preview '.repeat(30),
+      href: `/message/${i}`, checked: 'false',
+    })),
+  }, 'Start a draft email', []).request;
+  const limitError = () => ({ ok: false, status: 400,
+    text: async () => JSON.stringify({ detail: { error_type: 'max_tokens_exceeded' } }),
+  });
+
+  it('removes repeated target metadata without changing ids, safety rules, or the source request', () => {
+    const request = denseRequest();
+    const original = structuredClone(request);
+    const compact = compactTypeSafeRequest(request);
+    expect(JSON.stringify(compact).length).toBeLessThan(JSON.stringify(request).length * 0.65);
+    expect(compact.state).toEqual(request.state);
+    expect(compact.questions.operation).toEqual(request.questions.operation);
+    expect(compact.questions.goal_done).toEqual(request.questions.goal_done);
+    expect(compact.questions.stuck).toEqual(request.questions.stuck);
+    expect((compact.questions.click_target.criteria as Record<string, unknown>)['250']).toEqual({ element_index: '250' });
+    expect(request).toEqual(original);
+  });
+
+  it('retries only the decision with progressively smaller context and preserves every target', async () => {
+    const request = denseRequest();
+    const original = structuredClone(request);
+    const answer = { model: 'jev-latest', answers: { operation: { choice: 'CLICK' } } };
+    vi.mocked(fetch).mockResolvedValueOnce(limitError() as Response)
+      .mockResolvedValueOnce(limitError() as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => answer } as Response);
+    expect(await callTypeSafe(config, request)).toEqual(answer);
+    const bodies = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(bodies).toHaveLength(3);
+    expect(JSON.stringify(bodies[1]).length).toBeLessThan(JSON.stringify(bodies[0]).length);
+    expect(JSON.stringify(bodies[2]).length).toBeLessThan(JSON.stringify(bodies[1]).length);
+    for (const body of bodies) {
+      expect(body.state.task).toBe(request.state.task);
+      expect(body.state.elements.map((e: any) => e.index)).toEqual(request.state.elements.map(e => e.index));
+      expect(body.state.elements.every((e: any) => e.checked === 'false')).toBe(true);
+      expect(Object.keys(body.questions.click_target.criteria)).toEqual(Object.keys(request.questions.click_target.criteria!));
+    }
+    expect(request).toEqual(original);
+  });
+
+  it('retains dropdown option ids and does not rewrite custom target schemas', () => {
+    const request = denseRequest();
+    request.questions.select_target = { type: 'choice', criteria: { '1:1': { value: 'a' }, '1:2': { value: 'b' } },
+      instructions: structuredClone(request.questions.click_target.instructions) };
+    request.questions.custom_target = { type: 'choice', criteria: { custom: 'My rule' }, instructions: 'Choose wisely' };
+    const compact = compactTypeSafeRequest(request, 2);
+    expect((compact.questions.select_target.criteria as Record<string, unknown>)['1:2']).toEqual({ element_index: '1', option_index: '1:2' });
+    expect(compact.questions.custom_target).toEqual(request.questions.custom_target);
+  });
+
+  it('stops after three context-limit responses with an actionable error', async () => {
+    vi.mocked(fetch).mockResolvedValue(limitError() as Response);
+    await expect(callTypeSafe(config, denseRequest())).rejects.toThrow(/simpler page or choose another decision provider/);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([401, 400])('does not compact-retry unrelated HTTP %s errors', async (status) => {
+    vi.mocked(fetch).mockResolvedValue({ ok: false, status, text: async () => 'Invalid request' } as Response);
+    await expect(callTypeSafe(config, denseRequest())).rejects.toThrow(`HTTP ${status}`);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

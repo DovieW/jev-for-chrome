@@ -10,6 +10,7 @@ import { chromium } from 'playwright';
 fs.mkdirSync('.e2e-out', { recursive: true });
 const requests = [];
 let origin;
+let typeSafeAttempts = 0;
 const server = http.createServer(async (req, res) => {
   if (req.method === 'POST') {
     let data = '';
@@ -20,6 +21,23 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/chat') {
       const startup = body.messages[0].content.includes('starting URL');
       result = { choices: [{ message: { content: JSON.stringify(startup ? { url: origin + '/search.html' } : { text: 'blue widgets' }) } }] };
+    } else if (req.url === '/typesafe') {
+      typeSafeAttempts++;
+      if (typeSafeAttempts <= 2) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ detail: { error_type: 'max_tokens_exceeded' } }));
+        return;
+      }
+      const operation = 'TYPE_TEXT';
+      result = { model: 'jev-latest', answers: Object.fromEntries(
+        Object.entries(body.questions).map(([name, q]) => {
+          if (q.type === 'noul') return [name, { type: 'noul', noul: 0 }];
+          const choice = name === 'operation' ? operation : Object.keys(q.criteria)[0];
+          return [name, { choice, confidence: 1, probabilities: Object.fromEntries(
+            Object.keys(q.criteria).map(key => [key, key === choice ? 1 : 0])
+          ) }];
+        })
+      ) };
     } else {
       const state = JSON.parse(body.input);
       const filled = state.elements.some((e) => e.value === 'blue widgets');
@@ -268,6 +286,49 @@ try {
   }
   assert.ok(requests.filter((r) => r.path === '/decisions').every(({ body }) => body.model === 'gpt-6-luna' && body.questions.every((q) => q.type !== 'choice' || q.choices.length >= 2)));
   console.log('PASS Luna request parameters, priority tier, and decision schema on actual worker requests');
+
+  // A dense inbox-like page must recover without dropping or renumbering controls.
+  await worker.evaluate(async (endpoint) => {
+    const { jev_settings } = await chrome.storage.local.get('jev_settings');
+    jev_settings.activeProvider = 'typesafe';
+    jev_settings.typesafe = { apiKey: 'dummy-typesafe', model: 'jev-latest', endpoint };
+    jev_settings.textHelper.apiKey = 'dummy-text';
+    await chrome.storage.local.set({ jev_settings });
+  }, origin + '/typesafe');
+  const dense = await context.newPage();
+  await dense.goto(origin + '/search.html');
+  await dense.evaluate(() => {
+    const list = document.createElement('div');
+    list.style.cssText = 'display:grid;grid-template-columns:repeat(10,1fr);gap:1px';
+    for (let i = 0; i < 240; i++) {
+      const button = document.createElement('button');
+      button.style.cssText = 'display:block;width:100%;height:20px;padding:0;overflow:hidden';
+      button.textContent = `Message ${i} ` + 'long email preview '.repeat(25);
+      list.append(button);
+    }
+    document.body.append(list);
+  });
+  const denseTabId = await worker.evaluate(async (url) => (await chrome.tabs.query({})).find(t => t.url === url).id, origin + '/search.html');
+  const densePopup = await context.newPage();
+  await densePopup.goto(`chrome-extension://${extension}/popup.html?tabId=${denseTabId}`);
+  await densePopup.locator('textarea').fill('Enter blue widgets into the Search field');
+  await densePopup.getByRole('button', { name: 'Step', exact: true }).click();
+  state = await poll(progress, p => p.status === 'paused' || p.status === 'error');
+  assert.equal(state.status, 'paused', state.lastError);
+  assert.equal(state.currentStep, 1, 'Retries produce exactly one browser action');
+  assert.equal(await dense.inputValue('input[name=q]'), 'blue widgets');
+  const retries = requests.filter(r => r.path === '/typesafe').map(r => r.body);
+  assert.equal(retries.length, 3);
+  assert.ok(retries[0].state.elements.length > 200);
+  assert.ok(JSON.stringify(retries[2]).length < JSON.stringify(retries[1]).length);
+  assert.ok(JSON.stringify(retries[1]).length < JSON.stringify(retries[0]).length);
+  for (const body of retries) {
+    assert.deepEqual(Object.keys(body.questions.click_target.criteria), Object.keys(retries[0].questions.click_target.criteria));
+    assert.deepEqual(body.state.elements.map(e => e.index), retries[0].state.elements.map(e => e.index));
+  }
+  await densePopup.locator('.popup-shell').screenshot({ path: '.e2e-out/typesafe-context-recovery.png' });
+  console.log('PASS TypeSafe context-limit recovery on a dense page, stable target ids, and one trusted action');
+
 } finally {
   await context?.close();
   await new Promise((resolve) => server.close(resolve));

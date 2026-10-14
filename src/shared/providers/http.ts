@@ -2,6 +2,13 @@ const TRANSIENT_STATUSES = new Set([429, 503, 529]);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+export class ProviderHttpError extends Error {
+  constructor(public status: number, public detail: string, label: string) {
+    super(`${label} error (HTTP ${status})${detail ? `: ${detail}` : ''}`);
+    this.name = 'ProviderHttpError';
+  }
+}
+
 /**
  * POSTs JSON and returns the parsed body. Transient statuses are retried with backoff.
  * Model requests are idempotent; browser mutations are never retried through here.
@@ -47,7 +54,7 @@ export async function postJson(
       } catch {
         // ignore unreadable body
       }
-      throw new Error(`${label} error (HTTP ${response.status})${detail ? `: ${detail}` : ''}`);
+      throw new ProviderHttpError(response.status, detail, label);
     }
 
     return response.json();
