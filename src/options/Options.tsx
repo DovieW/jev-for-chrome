@@ -1,6 +1,45 @@
-import React, { useEffect, useState } from 'react';
-import { activeJevModel, callJevProvider } from '../shared/providers';
-import { describeHelperKey, isOfficialOpenAI } from '../shared/text-helper';
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Bot,
+  MessageSquare,
+  SlidersHorizontal,
+  RotateCcw,
+  ArrowUpRight,
+  Check,
+  Eye,
+  EyeOff,
+  Loader2,
+  ChevronRight,
+  ShieldCheck,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+} from "@/components/ui/card";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Separator } from "@/components/ui/separator";
+import { Brand, sendMessage } from "../ui/app";
+import { activeJevModel, callJevProvider } from "../shared/providers";
+import {
+  describeHelperKey,
+  isOfficialOpenAI,
+  generateFieldText,
+} from "../shared/text-helper";
 import {
   AppSettings,
   DEFAULT_SETTINGS,
@@ -8,663 +47,676 @@ import {
   JevRequest,
   TEXT_HELPER_PRESETS,
   TextHelperProvider,
-} from '../shared/types';
+} from "../shared/types";
 
-/** A minimal, valid decision request used by the connection test. */
-const TEST_REQUEST: Omit<JevRequest, 'model'> = {
+const TEST_REQUEST: Omit<JevRequest, "model"> = {
   state: {
-    task: 'Connection test',
-    page: { url: 'https://example.com', title: 'Example', text: 'Example Domain' },
-    elements: [{ index: '1', label: 'More information', operations: ['CLICK'] }],
+    task: "Connection test",
+    page: {
+      url: "https://example.com",
+      title: "Example",
+      text: "Example Domain",
+    },
+    elements: [
+      { index: "1", label: "More information", operations: ["CLICK"] },
+    ],
     recent_actions: [],
   },
   questions: {
     operation: {
-      type: 'choice',
-      criteria: { CLICK: 'Click more information', DONE: 'Done' },
-      instructions: 'Pick an operation',
+      type: "choice",
+      criteria: { CLICK: "Click more information", DONE: "Done" },
+      instructions: "Pick an operation",
     },
     click_target: {
-      type: 'choice',
-      criteria: { '1': { element: '[1] More information' } },
-      instructions: 'Which element to click?',
+      type: "choice",
+      criteria: { "1": { element: "[1] More information" } },
+      instructions: "Which element to click?",
     },
   },
 };
+type ConnectionState = {
+  status: "idle" | "testing" | "success" | "error";
+  message?: string;
+};
+const idle: ConnectionState = { status: "idle" };
+
+function Field({
+  id,
+  label,
+  note,
+  children,
+}: {
+  id: string;
+  label: string;
+  note?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{label}</Label>
+      {children}
+      {note && (
+        <p className="text-xs leading-relaxed text-muted-foreground">{note}</p>
+      )}
+    </div>
+  );
+}
+function SecretInput({
+  id,
+  value,
+  onChange,
+  placeholder = "Enter your API key",
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={visible ? "text" : "password"}
+        value={value}
+        autoComplete="off"
+        spellCheck={false}
+        className="pr-10"
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        className="absolute right-1 top-1 size-7 text-muted-foreground"
+        aria-label={visible ? "Hide API key" : "Show API key"}
+        aria-pressed={visible}
+        onClick={() => setVisible(!visible)}
+      >
+        {visible ? <EyeOff /> : <Eye />}
+      </Button>
+    </div>
+  );
+}
+function Choice({
+  id,
+  value,
+  onChange,
+  items,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  items: Array<[string, string]>;
+}) {
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {items.map(([value, label]) => (
+          <SelectItem key={value} value={value}>
+            {label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+function ConnectionResult({ state }: { state: ConnectionState }) {
+  return (
+    <span
+      role="status"
+      className={`min-w-0 text-xs leading-relaxed ${state.status === "error" ? "text-destructive" : "text-muted-foreground"}`}
+    >
+      {state.status === "success" && <Check className="mr-1 inline size-3.5" />}
+      {state.message}
+    </span>
+  );
+}
 
 export const Options: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [activeTab, setActiveTab] = useState<JevProviderType>('openrouter');
-  const [savedToast, setSavedToast] = useState(false);
-  const [testingStatus, setTestingStatus] = useState<string | null>(null);
+  const [saved, setSaved] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [ready, setReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [decisionTest, setDecisionTest] = useState<ConnectionState>(idle);
+  const [textTest, setTextTest] = useState<ConnectionState>(idle);
+  const decisionVersion = useRef(0);
+  const textVersion = useRef(0);
+  const dirty = JSON.stringify(settings) !== JSON.stringify(saved);
+  const provider = settings.activeProvider;
+  const config = settings[provider];
+  const helper = describeHelperKey(settings);
 
   useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_SETTINGS' }, (res?: { settings?: AppSettings }) => {
-      if (res?.settings) {
-        setSettings(res.settings);
-        setActiveTab(res.settings.activeProvider || 'openrouter');
-      }
-    });
+    sendMessage<{ settings: AppSettings }>({ type: "GET_SETTINGS" })
+      .then(({ settings }) => {
+        setSettings(settings);
+        setSaved(settings);
+        setReady(true);
+      })
+      .catch((err) => setError(err.message));
   }, []);
-
-  const handleSave = () => {
-    chrome.runtime.sendMessage(
-      { type: 'SAVE_SETTINGS', settings },
-      () => {
-        setSavedToast(true);
-        setTimeout(() => setSavedToast(false), 2500);
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (dirty) {
+        event.preventDefault();
+        event.returnValue = "";
       }
-    );
-  };
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [dirty]);
 
-  const handleTestConnection = async (provider: JevProviderType) => {
-    setTestingStatus(`Testing ${provider.toUpperCase()} connection...`);
+  const change = (next: AppSettings) => {
+    setSettings(next);
+    setNotice("");
+    setError("");
+  };
+  const changeConfig = (values: Record<string, string>) => {
+    change({ ...settings, [provider]: { ...config, ...values } });
+    decisionVersion.current++;
+    textVersion.current++;
+    setDecisionTest(idle);
+    setTextTest(idle);
+  };
+  const changeHelper = (values: Partial<AppSettings["textHelper"]>) => {
+    change({ ...settings, textHelper: { ...settings.textHelper, ...values } });
+    textVersion.current++;
+    setTextTest(idle);
+  };
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const snapshot = settings;
     try {
-      const testSettings: AppSettings = { ...settings, activeProvider: provider };
-      const model = activeJevModel(testSettings);
-      const started = Date.now();
-      const res = await callJevProvider(testSettings, { model, ...TEST_REQUEST });
-      const summary = JSON.stringify(res.answers?.operation ?? res.answers ?? res).slice(0, 120);
-      setTestingStatus(`✅ Success in ${Date.now() - started}ms. operation → ${summary}`);
+      await sendMessage({ type: "SAVE_SETTINGS", settings: snapshot });
+      setSaved(snapshot);
+      setNotice("Changes saved");
     } catch (err: any) {
-      setTestingStatus(`❌ Test failed: ${err?.message || String(err)}`);
+      setError(err.message);
+    } finally {
+      setSaving(false);
     }
   };
-
-  const handleResetDefaults = () => {
-    setSettings({
+  const test = async (kind: "decision" | "text") => {
+    const update = kind === "decision" ? setDecisionTest : setTextTest;
+    const version = kind === "decision" ? decisionVersion : textVersion;
+    const token = ++version.current;
+    update({ status: "testing", message: "Connecting…" });
+    const started = Date.now();
+    try {
+      if (kind === "decision")
+        await callJevProvider(settings, {
+          model: activeJevModel(settings),
+          ...TEST_REQUEST,
+        });
+      else
+        await generateFieldText(settings, {
+          goal: "Enter the word ready",
+          field: { label: "Test field" },
+          page: { title: "Connection test", text: "" },
+          recent_actions: [],
+        });
+      if (token === version.current)
+        update({
+          status: "success",
+          message: `Connected in ${Date.now() - started} ms`,
+        });
+    } catch (err: any) {
+      if (token === version.current)
+        update({ status: "error", message: err.message });
+    }
+  };
+  const reset = () => {
+    change({
       ...DEFAULT_SETTINGS,
-      activeProvider: settings.activeProvider,
-      typesafe: { ...DEFAULT_SETTINGS.typesafe, apiKey: settings.typesafe.apiKey },
-      openrouter: { ...DEFAULT_SETTINGS.openrouter, apiKey: settings.openrouter.apiKey },
+      activeProvider: provider,
+      typesafe: {
+        ...DEFAULT_SETTINGS.typesafe,
+        apiKey: settings.typesafe.apiKey,
+      },
+      openrouter: {
+        ...DEFAULT_SETTINGS.openrouter,
+        apiKey: settings.openrouter.apiKey,
+      },
       openai: { ...DEFAULT_SETTINGS.openai, apiKey: settings.openai.apiKey },
       cloudflare: {
         ...DEFAULT_SETTINGS.cloudflare,
         accountId: settings.cloudflare.accountId,
         apiToken: settings.cloudflare.apiToken,
       },
-      textHelper: { ...DEFAULT_SETTINGS.textHelper, apiKey: settings.textHelper.apiKey },
+      textHelper: {
+        ...DEFAULT_SETTINGS.textHelper,
+        apiKey: settings.textHelper.apiKey,
+      },
     });
+    decisionVersion.current++;
+    textVersion.current++;
+    setDecisionTest(idle);
+    setTextTest(idle);
   };
-
-  const handleTextProviderChange = (provider: TextHelperProvider) => {
-    const preset = TEXT_HELPER_PRESETS[provider];
-    setSettings({
-      ...settings,
-      textHelper: { ...settings.textHelper, provider, baseUrl: preset.baseUrl, model: preset.model },
-    });
-  };
+  const helperNote =
+    helper.source === "openai"
+      ? "Using your OpenAI Decisions key."
+      : helper.source === "openrouter"
+        ? "Using your OpenRouter key."
+        : helper.source === "helper"
+          ? "Uses this key for text requests."
+          : "Add a key here, or use a matching decision-provider key.";
 
   return (
-    <div style={styles.container}>
-      <div style={styles.card}>
-        <div style={styles.header}>
-          <h1 style={{ ...styles.title, display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src="icon48.png" width={28} height={28} alt="" style={{ borderRadius: 6 }} />
-            Jev for Chrome settings
-          </h1>
-          <p style={styles.subtitle}>
-            Configure your decision model provider (OpenAI Decisions or TypeSafe Jev) and Text Helper.
+    <div className="settings-shell">
+      <header className="app-header">
+        <div className="mx-auto flex h-16 max-w-[1000px] items-center justify-between px-6">
+          <Brand />
+          <span className="text-xs text-muted-foreground">Preferences</span>
+        </div>
+      </header>
+      <main className="mx-auto max-w-[1000px] px-6 pb-10 pt-10">
+        <div className="mb-8">
+          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Choose your models and customize how Jev runs.
           </p>
         </div>
-
-        {/* Active Provider Selector */}
-        <div style={styles.section}>
-          <label style={styles.sectionLabel}>Active Decision Provider</label>
-          <div style={styles.providerTabs}>
-            {(['openrouter', 'typesafe', 'cloudflare', 'openai'] as JevProviderType[]).map((p) => (
-              <button
-                key={p}
-                style={{
-                  ...styles.providerTab,
-                  ...(settings.activeProvider === p ? styles.providerTabActive : {}),
-                }}
-                onClick={() => {
-                  setSettings({ ...settings, activeProvider: p });
-                  setActiveTab(p);
-                }}
-              >
-                {p === 'openrouter' && 'OpenRouter (Decisions)'}
-                {p === 'typesafe' && 'TypeSafe.ai (Official)'}
-                {p === 'cloudflare' && 'Cloudflare Workers AI'}
-                {p === 'openai' && 'OpenAI Decisions (GPT-6 Luna)'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Provider Configuration Forms */}
-        <div style={styles.providerConfigBox}>
-          {activeTab === 'openai' && (
-            <div>
-              <h3 style={styles.subhead}>OpenAI Decisions Configuration</h3>
-              <p style={styles.helpText}>GPT-6 Luna chooses actions directly through OpenAI, separately from TypeSafe Jev.</p>
-              <div style={styles.field}>
-                <label style={styles.label}>API Key</label>
-                <input type="password" style={styles.input} value={settings.openai.apiKey}
-                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, apiKey: e.target.value } })} />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Model</label>
-                <input type="text" style={styles.input} value={settings.openai.model}
-                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, model: e.target.value } })} />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Endpoint</label>
-                <input type="text" style={styles.input} value={settings.openai.endpoint}
-                  onChange={(e) => setSettings({ ...settings, openai: { ...settings.openai, endpoint: e.target.value } })} />
-              </div>
-              <button style={styles.btnSecondary} onClick={() => handleTestConnection('openai')}>Test OpenAI Decisions</button>
-            </div>
-          )}
-          {activeTab === 'typesafe' && (
-            <div>
-              <h3 style={styles.subhead}>TypeSafe.ai Configuration</h3>
-              <div style={styles.field}>
-                <label style={styles.label}>API Key</label>
-                <input
-                  type="password"
-                  style={styles.input}
-                  placeholder="sk-..."
-                  value={settings.typesafe.apiKey}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      typesafe: { ...settings.typesafe, apiKey: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Model</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  value={settings.typesafe.model}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      typesafe: { ...settings.typesafe, model: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Endpoint</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  value={settings.typesafe.endpoint}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      typesafe: { ...settings.typesafe, endpoint: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <button
-                style={styles.btnSecondary}
-                onClick={() => handleTestConnection('typesafe')}
-              >
-                Test TypeSafe API
-              </button>
-            </div>
-          )}
-
-          {activeTab === 'openrouter' && (
-            <div>
-              <h3 style={styles.subhead}>OpenRouter Configuration</h3>
-              <div style={styles.field}>
-                <label style={styles.label}>OpenRouter API Key</label>
-                <input
-                  type="password"
-                  style={styles.input}
-                  placeholder="sk-or-v1-..."
-                  value={settings.openrouter.apiKey}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      openrouter: { ...settings.openrouter, apiKey: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Model</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  placeholder="typesafe/jev-1.13"
-                  value={settings.openrouter.model}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      openrouter: { ...settings.openrouter, model: e.target.value },
-                    })
-                  }
-                />
-                <p style={styles.helpText}>
-                  Use <code>typesafe/jev-1.13</code>. OpenRouter has no <code>typesafe/jev-latest</code>; that alias only exists on the TypeSafe API.
-                </p>
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Endpoint</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  value={settings.openrouter.endpoint}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      openrouter: { ...settings.openrouter, endpoint: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <button
-                style={styles.btnSecondary}
-                onClick={() => handleTestConnection('openrouter')}
-              >
-                Test OpenRouter Decisions API
-              </button>
-            </div>
-          )}
-
-          {activeTab === 'cloudflare' && (
-            <div>
-              <h3 style={styles.subhead}>Cloudflare Workers AI Configuration</h3>
-              <div style={styles.field}>
-                <label style={styles.label}>Account ID</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  placeholder="Cloudflare Account ID"
-                  value={settings.cloudflare.accountId}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cloudflare: { ...settings.cloudflare, accountId: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>API Token</label>
-                <input
-                  type="password"
-                  style={styles.input}
-                  placeholder="Cloudflare API Token (Workers AI Read/Write)"
-                  value={settings.cloudflare.apiToken}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cloudflare: { ...settings.cloudflare, apiToken: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <div style={styles.field}>
-                <label style={styles.label}>Model</label>
-                <input
-                  type="text"
-                  style={styles.input}
-                  value={settings.cloudflare.model}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cloudflare: { ...settings.cloudflare, model: e.target.value },
-                    })
-                  }
-                />
-              </div>
-              <button
-                style={styles.btnSecondary}
-                onClick={() => handleTestConnection('cloudflare')}
-              >
-                Test Cloudflare AI
-              </button>
-            </div>
-          )}
-
-          {testingStatus && <div style={styles.testStatusBanner}>{testingStatus}</div>}
-        </div>
-
-        {/* Text Helper Generation Model */}
-        <div style={styles.section}>
-          <label style={styles.sectionLabel}>
-            Text Generation Helper (for TYPE_TEXT operations)
-          </label>
-          <p style={styles.helpText}>
-            When the decision model selects an input box to fill, this lightweight LLM generates the text payload from the goal.
-            On a new or blank tab, it also chooses the starting URL.
-            Changing the provider resets Base URL and Model to that provider's defaults.
-          </p>
-          <div style={styles.grid2}>
-            <div style={styles.field}>
-              <label style={styles.label}>Provider / Service</label>
-              <select
-                style={styles.input}
-                value={settings.textHelper.provider}
-                onChange={(e) => handleTextProviderChange(e.target.value as TextHelperProvider)}
-              >
-                <option value="openrouter">OpenRouter (Default)</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="openai">OpenAI / Compatible API</option>
-              </select>
-            </div>
-
-            <div style={styles.field}>
-              <label style={styles.label}>Model Name</label>
-              <input
-                type="text"
-                style={styles.input}
-                value={settings.textHelper.model}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    textHelper: { ...settings.textHelper, model: e.target.value },
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div style={styles.field}>
-            <label style={styles.label}>API Key</label>
-            <input
-              type="password"
-              style={styles.input}
-              placeholder="Helper key (optional with a matching decision-provider key)"
-              value={settings.textHelper.apiKey}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  textHelper: { ...settings.textHelper, apiKey: e.target.value },
-                })
-              }
-            />
-          </div>
-
-          <p style={{ ...styles.helpText, color: describeHelperKey(settings).source ? '#86efac' : '#fca5a5' }}>
-            {describeHelperKey(settings).message}
-          </p>
-          <div style={styles.field}>
-            <label style={styles.label}>Base URL</label>
-            <input
-              type="text"
-              style={styles.input}
-              value={settings.textHelper.baseUrl}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  textHelper: { ...settings.textHelper, baseUrl: e.target.value },
-                })
-              }
-            />
-          </div>
-
-          {isOfficialOpenAI(describeHelperKey(settings).baseUrl) && (
-            <div style={styles.field}>
-              <label style={styles.label}>OpenAI Text Processing Tier</label>
-              <select style={styles.input} value={settings.textHelper.serviceTier || 'default'}
-                onChange={(e) => setSettings({ ...settings, textHelper: { ...settings.textHelper, serviceTier: e.target.value as 'default' | 'priority' } })}>
-                <option value="default">Standard</option>
-                <option value="priority">Fast (Priority)</option>
-              </select>
-              <p style={styles.helpText}>Fast / Priority uses higher-cost processing for field text and starting-URL requests.</p>
-            </div>
-          )}
-        </div>
-
-        {/* Agent Execution Settings */}
-        <div style={styles.section}>
-          <label style={styles.sectionLabel}>Agent Runtime Parameters</label>
-          <div style={styles.grid2}>
-            <div style={styles.field}>
-              <label style={styles.label}>Max Steps</label>
-              <input
-                type="number"
-                style={styles.input}
-                value={settings.maxSteps}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    maxSteps: parseInt(e.target.value, 10) || 30,
-                  })
-                }
-              />
-            </div>
-
-            <div style={styles.field}>
-              <label style={styles.label}>Step Delay (ms)</label>
-              <input
-                type="number"
-                style={styles.input}
-                value={settings.stepDelayMs}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    stepDelayMs: parseInt(e.target.value, 10) || 300,
-                  })
-                }
-              />
-            </div>
-          </div>
-
-          <div style={styles.checkboxField}>
-            <label style={styles.checkboxLabel}>
-              <input
-                type="checkbox"
-                checked={settings.showOverlay}
-                onChange={(e) =>
-                  setSettings({ ...settings, showOverlay: e.target.checked })
-                }
-              />
-              Show [1], [2] element badges overlay on webpage during execution
-            </label>
-          </div>
-
-          <div style={styles.checkboxField}>
-            <label style={styles.checkboxLabel}>
-              <input
-                type="checkbox"
-                checked={settings.trustedInput}
-                onChange={(e) => setSettings({ ...settings, trustedInput: e.target.checked })}
-              />
-              Trusted input (recommended): send clicks and keystrokes through Chrome's debugger so pages
-              treat them as real user input. Chrome shows a "started debugging" bar on the tab while a run is active;
-              off, the extension uses synthetic DOM events instead.
-            </label>
-          </div>
-        </div>
-
-        {/* Action Buttons */}
-        <div style={styles.actionsRow}>
-          <button style={styles.btnPrimary} onClick={handleSave}>
-            Save All Settings
-          </button>
-          <button
-            style={styles.btnSecondary}
-            title="Restore endpoints, model ids and runtime options to their defaults. API keys are kept."
-            onClick={handleResetDefaults}
+        {error && (
+          <div
+            role="alert"
+            className="mb-5 rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive"
           >
-            Reset to defaults
-          </button>
-          {savedToast && <span style={styles.savedToast}>✅ Settings saved!</span>}
-        </div>
-      </div>
+            {error}
+          </div>
+        )}
+        <form id="settings-form" onSubmit={save}>
+          <fieldset disabled={!ready || saving} className="min-w-0">
+            <Tabs defaultValue="models">
+              <TabsList className="mb-6">
+                <TabsTrigger value="models">
+                  <Bot className="mr-1.5 size-4" />
+                  Models
+                </TabsTrigger>
+                <TabsTrigger value="behavior">
+                  <SlidersHorizontal className="mr-1.5 size-4" />
+                  Behavior
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="models" className="mt-0">
+                <div className="grid items-stretch gap-5 md:grid-cols-2">
+                  <Card className="gap-5 shadow-none">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <Bot className="size-4 text-muted-foreground" />
+                        Decision model
+                      </CardTitle>
+                      <CardDescription>
+                        Chooses the next action on the page.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-5">
+                      <Field id="decision-provider" label="Provider">
+                        <Choice
+                          id="decision-provider"
+                          value={provider}
+                          onChange={(value) => {
+                            change({
+                              ...settings,
+                              activeProvider: value as JevProviderType,
+                            });
+                            decisionVersion.current++;
+                            setDecisionTest(idle);
+                          }}
+                          items={[
+                            ["openrouter", "OpenRouter"],
+                            ["typesafe", "TypeSafe"],
+                            ["cloudflare", "Cloudflare Workers AI"],
+                            ["openai", "OpenAI Decisions"],
+                          ]}
+                        />
+                      </Field>
+                      <Field id="decision-model" label="Model">
+                        <Input
+                          id="decision-model"
+                          value={config.model}
+                          spellCheck={false}
+                          onChange={(e) =>
+                            changeConfig({ model: e.target.value })
+                          }
+                        />
+                      </Field>
+                      {provider === "cloudflare" && (
+                        <Field id="account-id" label="Account ID">
+                          <Input
+                            id="account-id"
+                            value={settings.cloudflare.accountId}
+                            onChange={(e) =>
+                              changeConfig({ accountId: e.target.value })
+                            }
+                          />
+                        </Field>
+                      )}
+                      <Field
+                        id="decision-key"
+                        label={
+                          provider === "cloudflare" ? "API token" : "API key"
+                        }
+                        note="Stored locally. Sent only to your chosen provider."
+                      >
+                        <SecretInput
+                          key={provider}
+                          id="decision-key"
+                          value={
+                            provider === "cloudflare"
+                              ? settings.cloudflare.apiToken
+                              : settings[provider].apiKey
+                          }
+                          onChange={(value) =>
+                            changeConfig(
+                              provider === "cloudflare"
+                                ? { apiToken: value }
+                                : { apiKey: value },
+                            )
+                          }
+                        />
+                      </Field>
+                      <details className="group">
+                        <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+                          <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+                          Advanced configuration
+                        </summary>
+                        <div className="pt-4">
+                          <Field id="decision-endpoint" label="Endpoint">
+                            <Input
+                              id="decision-endpoint"
+                              type="url"
+                              value={config.endpoint || ""}
+                              placeholder={
+                                provider === "cloudflare"
+                                  ? "Use the account’s default endpoint"
+                                  : ""
+                              }
+                              onChange={(e) =>
+                                changeConfig({ endpoint: e.target.value })
+                              }
+                            />
+                          </Field>
+                        </div>
+                      </details>
+                    </CardContent>
+                    <CardFooter className="mt-auto flex-wrap gap-3 border-t pt-5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={decisionTest.status === "testing"}
+                        onClick={() => test("decision")}
+                      >
+                        {decisionTest.status === "testing" ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <ArrowUpRight />
+                        )}
+                        Test connection
+                      </Button>
+                      <ConnectionResult state={decisionTest} />
+                    </CardFooter>
+                  </Card>
+                  <Card className="gap-5 shadow-none">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <MessageSquare className="size-4 text-muted-foreground" />
+                        Text model
+                      </CardTitle>
+                      <CardDescription>
+                        Writes field values and chooses starting pages.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-5">
+                      <Field id="text-provider" label="Provider">
+                        <Choice
+                          id="text-provider"
+                          value={settings.textHelper.provider}
+                          onChange={(value) => {
+                            const provider = value as TextHelperProvider;
+                            changeHelper({
+                              provider,
+                              ...TEXT_HELPER_PRESETS[provider],
+                            });
+                          }}
+                          items={[
+                            ["openrouter", "OpenRouter"],
+                            ["deepseek", "DeepSeek"],
+                            ["openai", "OpenAI / Compatible API"],
+                          ]}
+                        />
+                      </Field>
+                      <Field id="text-model" label="Model">
+                        <Input
+                          id="text-model"
+                          value={settings.textHelper.model}
+                          spellCheck={false}
+                          onChange={(e) =>
+                            changeHelper({ model: e.target.value })
+                          }
+                        />
+                      </Field>
+                      <Field id="text-key" label="API key" note={helperNote}>
+                        <SecretInput
+                          id="text-key"
+                          value={settings.textHelper.apiKey}
+                          placeholder="Optional with a matching provider key"
+                          onChange={(value) => changeHelper({ apiKey: value })}
+                        />
+                      </Field>
+                      {isOfficialOpenAI(helper.baseUrl) && (
+                        <Field
+                          id="text-tier"
+                          label="Processing"
+                          note="Priority offers faster processing at a higher cost."
+                        >
+                          <Choice
+                            id="text-tier"
+                            value={settings.textHelper.serviceTier || "default"}
+                            onChange={(value) =>
+                              changeHelper({
+                                serviceTier: value as "default" | "priority",
+                              })
+                            }
+                            items={[
+                              ["default", "Standard"],
+                              ["priority", "Fast / Priority"],
+                            ]}
+                          />
+                        </Field>
+                      )}
+                      <details className="group">
+                        <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+                          <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+                          Advanced configuration
+                        </summary>
+                        <div className="pt-4">
+                          <Field id="text-base-url" label="Base URL">
+                            <Input
+                              id="text-base-url"
+                              type="url"
+                              value={settings.textHelper.baseUrl}
+                              onChange={(e) =>
+                                changeHelper({ baseUrl: e.target.value })
+                              }
+                            />
+                          </Field>
+                        </div>
+                      </details>
+                    </CardContent>
+                    <CardFooter className="mt-auto flex-wrap gap-3 border-t pt-5">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={textTest.status === "testing"}
+                        onClick={() => test("text")}
+                      >
+                        {textTest.status === "testing" ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <ArrowUpRight />
+                        )}
+                        Test connection
+                      </Button>
+                      <ConnectionResult state={textTest} />
+                    </CardFooter>
+                  </Card>
+                </div>
+                <p className="mt-5 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+                  <ShieldCheck className="mt-px size-3.5 shrink-0" />
+                  No telemetry. During a run, page text is shared with your
+                  selected models. Password fields are excluded.
+                </p>
+              </TabsContent>
+              <TabsContent value="behavior" className="mt-0">
+                <Card className="shadow-none">
+                  <CardHeader>
+                    <CardTitle className="text-base">Run preferences</CardTitle>
+                    <CardDescription>
+                      Set the pace and how the assistant interacts with a page.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="grid max-w-lg gap-5 sm:grid-cols-2">
+                      <Field
+                        id="max-steps"
+                        label="Step limit"
+                        note="Maximum actions in a single run."
+                      >
+                        <Input
+                          id="max-steps"
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={settings.maxSteps}
+                          onChange={(e) =>
+                            change({
+                              ...settings,
+                              maxSteps: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </Field>
+                      <Field
+                        id="step-delay"
+                        label="Delay between steps (ms)"
+                        note="Use 0 to continue without a delay."
+                      >
+                        <Input
+                          id="step-delay"
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={settings.stepDelayMs}
+                          onChange={(e) =>
+                            change({
+                              ...settings,
+                              stepDelayMs: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </Field>
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between gap-8">
+                      <div>
+                        <Label htmlFor="show-overlay">Page labels</Label>
+                        <p className="mt-1.5 text-sm text-muted-foreground">
+                          Show numbered labels on elements the assistant can
+                          use.
+                        </p>
+                      </div>
+                      <Switch
+                        id="show-overlay"
+                        checked={settings.showOverlay}
+                        onCheckedChange={(showOverlay) =>
+                          change({ ...settings, showOverlay })
+                        }
+                      />
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between gap-8">
+                      <div>
+                        <Label htmlFor="trusted-input">Trusted input</Label>
+                        <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                          Send clicks and keystrokes as real user input. Chrome
+                          shows a debugging banner during the run.
+                        </p>
+                      </div>
+                      <Switch
+                        id="trusted-input"
+                        checked={settings.trustedInput}
+                        onCheckedChange={(trustedInput) =>
+                          change({ ...settings, trustedInput })
+                        }
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+            </Tabs>
+          </fieldset>
+        </form>
+        <footer className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t pt-5">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!ready || saving}
+            onClick={reset}
+            className="text-muted-foreground"
+          >
+            <RotateCcw />
+            Reset defaults
+          </Button>
+          <div className="flex items-center gap-4">
+            <span role="status" className="text-xs text-muted-foreground">
+              {!ready
+                ? "Loading preferences…"
+                : dirty
+                  ? "Unsaved changes"
+                  : notice || "All changes saved"}
+            </span>
+            {dirty && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={saving}
+                onClick={() => {
+                  change(saved);
+                  decisionVersion.current++;
+                  textVersion.current++;
+                  setDecisionTest(idle);
+                  setTextTest(idle);
+                }}
+              >
+                Discard
+              </Button>
+            )}
+            <Button
+              type="submit"
+              form="settings-form"
+              disabled={!ready || saving || !dirty}
+            >
+              {saving && <Loader2 className="animate-spin" />}Save changes
+            </Button>
+          </div>
+        </footer>
+        <p className="mt-8 text-center text-[11px] text-muted-foreground">
+          Jev for Chrome · Community project
+        </p>
+      </main>
     </div>
   );
-};
-
-const styles: Record<string, any> = {
-  container: {
-    backgroundColor: '#090d16',
-    minHeight: '100vh',
-    padding: '32px 16px',
-    display: 'flex',
-    justifyContent: 'center',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    color: '#e2e8f0',
-  },
-  card: {
-    backgroundColor: '#0f172a',
-    borderRadius: 12,
-    border: '1px solid #1e293b',
-    padding: 32,
-    maxWidth: 680,
-    width: '100%',
-    boxShadow: '0 20px 25px -5px rgba(0,0,0,0.5)',
-  },
-  header: {
-    marginBottom: 24,
-    borderBottom: '1px solid #1e293b',
-    paddingBottom: 16,
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 700,
-    color: '#f8fafc',
-    margin: 0,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: '#94a3b8',
-    marginTop: 6,
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionLabel: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: '#38bdf8',
-    marginBottom: 10,
-    display: 'block',
-  },
-  helpText: {
-    fontSize: 12,
-    color: '#94a3b8',
-    marginTop: -4,
-    marginBottom: 12,
-  },
-  providerTabs: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  providerTab: {
-    flex: 1,
-    padding: '10px 14px',
-    backgroundColor: '#1e293b',
-    border: '1px solid #334155',
-    color: '#94a3b8',
-    borderRadius: 8,
-    cursor: 'pointer',
-    fontSize: 13,
-    fontWeight: 600,
-    textAlign: 'center',
-  },
-  providerTabActive: {
-    backgroundColor: '#312e81',
-    borderColor: '#6366f1',
-    color: '#ffffff',
-  },
-  providerConfigBox: {
-    backgroundColor: '#131e32',
-    border: '1px solid #1e293b',
-    borderRadius: 8,
-    padding: 20,
-    marginBottom: 24,
-  },
-  subhead: {
-    fontSize: 15,
-    color: '#f1f5f9',
-    marginTop: 0,
-    marginBottom: 16,
-  },
-  field: {
-    marginBottom: 14,
-  },
-  label: {
-    fontSize: 12,
-    color: '#94a3b8',
-    marginBottom: 6,
-    display: 'block',
-    fontWeight: 500,
-  },
-  input: {
-    width: '100%',
-    boxSizing: 'border-box',
-    backgroundColor: '#0f172a',
-    border: '1px solid #334155',
-    color: '#f8fafc',
-    borderRadius: 6,
-    padding: '8px 12px',
-    fontSize: 13,
-    outline: 'none',
-  },
-  grid2: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
-    gap: 12,
-  },
-  checkboxField: {
-    marginTop: 10,
-  },
-  checkboxLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    fontSize: 13,
-    color: '#cbd5e1',
-    cursor: 'pointer',
-  },
-  actionsRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-    marginTop: 24,
-    paddingTop: 16,
-    borderTop: '1px solid #1e293b',
-  },
-  btnPrimary: {
-    backgroundColor: '#4f46e5',
-    color: '#ffffff',
-    border: 'none',
-    padding: '10px 20px',
-    borderRadius: 6,
-    fontSize: 14,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  btnSecondary: {
-    backgroundColor: '#1e293b',
-    color: '#38bdf8',
-    border: '1px solid #0284c7',
-    padding: '8px 14px',
-    borderRadius: 6,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-    marginTop: 6,
-  },
-  savedToast: {
-    color: '#10b981',
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  testStatusBanner: {
-    marginTop: 14,
-    padding: 10,
-    backgroundColor: '#0f172a',
-    border: '1px solid #334155',
-    borderRadius: 6,
-    fontSize: 12,
-    fontFamily: 'monospace',
-    color: '#e2e8f0',
-    wordBreak: 'break-all',
-  },
 };

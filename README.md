@@ -158,6 +158,8 @@ What comes next, including an MCP server so other agents can use Jev as their ex
 
 ## Development
 
+The popup and Settings use local [shadcn/ui](https://ui.shadcn.com/) components, Radix primitives, and Lucide SVG icons. Shared colors and typography live in `src/ui/styles.css`. The existing Vite build compiles React, TypeScript, and Tailwind; there are no remote UI scripts or fonts.
+
 ```bash
 npm run check      # typecheck + unit tests + production build
 npm test           # vitest
@@ -189,7 +191,9 @@ src/
   shared/action-space.ts     element table, Jev questions, strict answer validation
   shared/text-helper.ts      TYPE_TEXT value generation
   shared/providers/          TypeSafe, OpenRouter, Cloudflare, OpenAI adapters
-  popup/, options/           React UI
+  popup/, options/           React + shadcn/ui screens
+  components/ui/             Local shadcn components (Radix primitives)
+  ui/styles.css              Shared neutral theme
 public/manifest.json         MV3 manifest (copied into dist/)
 ```
 

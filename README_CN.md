@@ -158,6 +158,8 @@ OpenAI 官方文本请求支持 **Standard**（默认）或 **Fast (Priority)**�
 
 ## 开发
 
+弹窗和设置页使用本地 [shadcn/ui](https://ui.shadcn.com/) 组件、Radix 基础组件和 Lucide SVG 图标。共用的颜色和字体位于 `src/ui/styles.css`。沿用 Vite 构建 React、TypeScript 和 Tailwind，不加载远程界面脚本或字体。
+
 ```bash
 npm run check      # 类型检查 + 单元测试 + 生产构建
 npm test           # vitest
@@ -189,7 +191,9 @@ src/
   shared/action-space.ts     元素表，Jev 问题，严格答案校验
   shared/text-helper.ts      TYPE_TEXT 取值
   shared/providers/          TypeSafe、OpenRouter、Cloudflare、OpenAI 适配器
-  popup/, options/           React 界面
+  popup/, options/           React + shadcn/ui 界面
+  components/ui/             本地 shadcn 组件（Radix 基础组件）
+  ui/styles.css              共用的中性配色
 public/manifest.json         MV3 manifest（构建时复制到 dist/）
 ```
 

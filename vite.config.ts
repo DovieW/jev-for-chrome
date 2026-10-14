@@ -2,11 +2,13 @@ import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { defineConfig } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { '@': resolve(rootDir, 'src') } },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

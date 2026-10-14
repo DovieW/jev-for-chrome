@@ -80,8 +80,12 @@ try {
     extension = (await cdp.send('Extensions.loadUnpacked', { path: dist, enableInIncognito: false })).id;
     await cdp.detach();
   }
-  await context.route('**/*', (route) => {
+  await context.route('**/*', async (route) => {
     const url = route.request().url();
+    if (url === 'https://api.openai.com/v1/chat/completions') {
+      const response = await route.fetch({ url: origin + '/chat' });
+      return route.fulfill({ response });
+    }
     return url.startsWith(origin + '/') || url.startsWith('chrome-extension:') ? route.continue() : route.abort();
   });
   // Opening Options wakes a lazily started MV3 worker before we install the mock transport.
@@ -99,27 +103,64 @@ try {
     };
   }, origin);
 
-  await options.getByRole('button', { name: 'OpenAI Decisions (GPT-6 Luna)', exact: true }).click();
-  // Configuration field labels are siblings rather than associated <label for> elements.
-  const model = options.locator('label:text-is("Model") + input');
+  async function choose(id, label) {
+    await options.locator('#' + id).click();
+    await options.getByRole('option', { name: label, exact: true }).click();
+  }
+  await options.waitForFunction(() => !document.querySelector('fieldset')?.disabled);
+  await options.locator('#decision-provider').focus();
+  await options.keyboard.press('Space');
+  await options.getByRole('option', { name: 'OpenRouter', exact: true }).waitFor();
+  await poll(() => options.evaluate(() => document.activeElement?.textContent), (text) => text === 'OpenRouter');
+  await options.keyboard.press('End');
+  await poll(() => options.evaluate(() => document.activeElement?.textContent), (text) => text === 'OpenAI Decisions');
+  await options.keyboard.press('Enter');
+  assert.match(await options.locator('#decision-provider').innerText(), /OpenAI Decisions/);
+  const model = options.getByLabel('Model', { exact: true }).first();
   assert.equal(await model.inputValue(), 'gpt-6-luna');
-  const endpoint = options.locator('label:text-is("Endpoint") + input');
+  await options.locator('details').first().locator('summary').click();
+  const endpoint = options.getByLabel('Endpoint', { exact: true });
   assert.equal(await endpoint.inputValue(), 'https://api.openai.com/v1/decisions');
   await endpoint.fill(origin + '/decisions');
-  await options.locator('label:text-is("API Key") + input').first().fill('dummy-openai-key');
-  await options.getByRole('button', { name: 'Test OpenAI Decisions', exact: true }).click();
-  await options.getByText(/Success in/).waitFor();
-  await options.locator('select').first().selectOption('openai');
-  assert.equal(await options.locator('label:text-is("Model Name") + input').inputValue(), 'gpt-6-luna');
-  const tier = options.locator('label:text-is("OpenAI Text Processing Tier") + select');
-  assert.equal(await tier.inputValue(), 'default');
-  await tier.selectOption('priority');
-  await options.getByRole('button', { name: 'Save All Settings', exact: true }).click();
-  await poll(() => worker.evaluate(async () => (await chrome.storage.local.get('jev_settings')).jev_settings), (s) => s?.activeProvider === 'openai' && s?.textHelper.serviceTier === 'priority');
+  await options.getByLabel('API key', { exact: true }).first().fill('dummy-openai-key');
+  await options.getByRole('button', { name: 'Test connection', exact: true }).first().click();
+  await options.getByText(/Connected in/).first().waitFor();
+  await choose('text-provider', 'OpenAI / Compatible API');
+  assert.equal(await options.getByLabel('Model', { exact: true }).nth(1).inputValue(), 'gpt-6-luna');
+  const tier = options.getByRole('combobox', { name: 'Processing', exact: true });
+  assert.match(await tier.innerText(), /Standard/);
+  await choose('text-tier', 'Fast / Priority');
+  await options.getByRole('button', { name: 'Test connection', exact: true }).nth(1).click();
+  await options.getByText(/Connected in/).nth(1).waitFor();
+  await options.getByRole('tab', { name: 'Behavior', exact: true }).click();
+  await options.getByLabel('Delay between steps (ms)', { exact: true }).fill('0');
+  const labels = options.getByRole('switch', { name: 'Page labels', exact: true });
+  await labels.click();
+  assert.equal(await labels.getAttribute('aria-checked'), 'false');
+  await labels.click();
+  await options.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await poll(() => worker.evaluate(async () => (await chrome.storage.local.get('jev_settings')).jev_settings), (s) => s?.activeProvider === 'openai' && s?.textHelper.serviceTier === 'priority' && s?.stepDelayMs === 0);
+  await options.getByRole('button', { name: 'Save changes', exact: true }).isDisabled().then((disabled) => assert.ok(disabled));
+  await options.screenshot({ path: '.e2e-out/shadcn-behavior.png', fullPage: true });
   await options.reload();
-  assert.equal(await tier.inputValue(), 'priority');
-  await options.screenshot({ path: '.e2e-out/openai-options.png', fullPage: true });
-  console.log('PASS OpenAI provider selection, connection test, Luna preset, tier persistence');
+  assert.match(await tier.innerText(), /Fast \/ Priority/);
+  await options.screenshot({ path: '.e2e-out/shadcn-settings.png', fullPage: true });
+  await options.getByRole('tab', { name: 'Behavior', exact: true }).click();
+  assert.equal(await options.getByLabel('Delay between steps (ms)', { exact: true }).inputValue(), '0');
+  await options.getByRole('tab', { name: 'Models', exact: true }).click();
+  await options.getByLabel('Model', { exact: true }).first().fill('draft-model');
+  await options.getByRole('button', { name: 'Discard', exact: true }).click();
+  assert.equal(await model.inputValue(), 'gpt-6-luna');
+  const stored = await worker.evaluate(async () => (await chrome.storage.local.get('jev_settings')).jev_settings);
+  await options.getByRole('button', { name: 'Reset defaults', exact: true }).click();
+  assert.equal(await options.getByLabel('API key', { exact: true }).first().inputValue(), 'dummy-openai-key');
+  assert.deepEqual(await worker.evaluate(async () => (await chrome.storage.local.get('jev_settings')).jev_settings), stored);
+  await options.getByRole('button', { name: 'Discard', exact: true }).click();
+  await options.setViewportSize({ width: 520, height: 900 });
+  assert.ok(await options.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await options.screenshot({ path: '.e2e-out/shadcn-settings-mobile.png', fullPage: true });
+  await options.setViewportSize({ width: 1280, height: 900 });
+  console.log('PASS keyboard provider selects, connection tests, saved tier, zero delay, switches, discard/reset, and responsive layout');
 
   async function newTabPopup() {
     const tab = await worker.evaluate(() => chrome.tabs.create({ url: 'chrome://newtab/' }));
@@ -127,11 +168,13 @@ try {
     const popup = await context.newPage();
     await popup.goto(`chrome-extension://${extension}/popup.html?tabId=${tab.id}`);
     await popup.locator('textarea').fill('Enter blue widgets into the Search field');
-    assert.match(await popup.locator('body').innerText(), /OpenAI Decisions \(Luna\)/);
+    assert.match(await popup.locator('body').innerText(), /OpenAI Decisions/);
+    assert.match(await popup.locator('body').innerText(), /gpt-6-luna/);
     return { popup, page };
   }
   const progress = () => options.evaluate(async () => (await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' })).progress);
   const step = await newTabPopup();
+  await step.popup.locator('.popup-shell').screenshot({ path: '.e2e-out/shadcn-popup.png' });
   await step.popup.getByRole('button', { name: /Step/, exact: false }).click();
   let state = await poll(progress, (p) => p.status === 'paused' || p.status === 'error');
   assert.equal(state.status, 'paused', state.lastError);
@@ -146,7 +189,10 @@ try {
   await step.popup.getByRole('button', { name: /Step/ }).click();
   state = await poll(progress, (p) => p.status === 'done' || p.status === 'error');
   assert.equal(state.status, 'done', state.lastError);
-  await step.popup.screenshot({ path: '.e2e-out/openai-step.png', fullPage: true });
+  const shell = await step.popup.locator('.popup-shell').boundingBox();
+  const footer = await step.popup.locator('footer').boundingBox();
+  assert.ok(footer.y + footer.height <= shell.y + shell.height + 1, 'Footer stays visible in the 600px popup');
+  await step.popup.locator('.popup-shell').screenshot({ path: '.e2e-out/shadcn-popup-complete.png' });
   console.log('PASS new-tab Step navigates, pauses, fills through OpenAI, and completes');
 
   // Close the first run's page so page discovery targets the next new tab reliably.
@@ -160,11 +206,28 @@ try {
   assert.equal(state.currentStep, 2);
   assert.equal(await run.page.inputValue('input[name=q]'), 'blue widgets');
   assert.equal(state.inputNote, undefined);
-  await run.popup.screenshot({ path: '.e2e-out/openai-run.png', fullPage: true });
+  await run.popup.locator('.popup-shell').screenshot({ path: '.e2e-out/shadcn-popup-run.png' });
   console.log('PASS new-tab Run navigates and completes with trusted input');
 
+  await run.page.close();
+  await run.popup.close();
+  await worker.evaluate(async () => {
+    const { jev_settings } = await chrome.storage.local.get('jev_settings');
+    jev_settings.openai.apiKey = '';
+    jev_settings.textHelper.apiKey = '';
+    await chrome.storage.local.set({ jev_settings });
+  });
+  const missingKey = await newTabPopup();
+  await missingKey.popup.locator('textarea').press('Control+Enter');
+  state = await poll(progress, (p) => p.status === 'error');
+  assert.equal(state.inputNote, undefined);
+  await missingKey.popup.getByRole('alert').getByText('Add an API key in Settings to start this task.', { exact: true }).waitFor();
+  await missingKey.popup.getByRole('button', { name: 'Open Settings', exact: true }).waitFor();
+  await missingKey.popup.locator('.popup-shell').screenshot({ path: '.e2e-out/shadcn-popup-error.png' });
+  console.log('PASS keyboard run shortcut and actionable missing-key state');
+
   const texts = requests.filter((r) => r.path === '/chat');
-  assert.equal(texts.length, 4);
+  assert.equal(texts.length, 5);
   for (const { body } of texts) {
     assert.equal(body.model, 'gpt-6-luna');
     assert.equal(body.max_completion_tokens, 1024);

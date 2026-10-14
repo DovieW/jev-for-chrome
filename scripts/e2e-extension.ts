@@ -161,9 +161,9 @@ async function runTask(context: BrowserContext, sw: Worker, extId: string, task:
     popup = await context.newPage();
     attachPageLogging(popup, log);
     await popup.goto(`chrome-extension://${extId}/popup.html?tabId=${tabId}`);
-    await popup.getByText('Jev for Chrome').first().waitFor({ timeout: 10000 });
+    await popup.getByRole('button', { name: 'Settings', exact: true }).waitFor({ timeout: 10000 });
     await popup.locator('textarea').fill(task.goal);
-    await popup.getByRole('button', { name: /^▶ Run$/ }).click();
+    await popup.getByRole('button', { name: 'Run task', exact: true }).click();
     await page.bringToFront();
     log.add(`[${task.name}] goal: ${task.goal}`);
 
@@ -317,12 +317,13 @@ async function main() {
     const options = await context.newPage();
     attachPageLogging(options, log);
     await options.goto(`chrome-extension://${extId}/options.html`);
-    await options.getByText('Jev for Chrome settings').waitFor({ timeout: 10000 });
+    await options.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ timeout: 10000 });
+    await options.waitForFunction(() => !document.querySelector('fieldset')?.disabled);
     // The visible model field depends on the active provider tab (OpenRouter/TypeSafe/Cloudflare
     // each render their own "Model" input); match by adjacent label instead of a fixed placeholder
     // that only exists on the OpenRouter tab.
     log.add(
-      `options page ok; provider = ${JEV_PROVIDER}; model = "${await options.locator('label:text-is("Model") + input').inputValue()}"`
+      `options page ok; provider = ${JEV_PROVIDER}; model = "${await options.getByLabel('Model', { exact: true }).first().inputValue()}"`
     );
     await options.screenshot({ path: path.join(OUT, 'options.png') });
     await options.close();
