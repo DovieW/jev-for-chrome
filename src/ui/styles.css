@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -9,17 +10,17 @@
   --color-popover: var(--card);
   --color-popover-foreground: var(--foreground);
   --color-primary: var(--primary);
-  --color-primary-foreground: #fff;
+  --color-primary-foreground: #f6f7fa;
   --color-secondary: var(--muted);
   --color-secondary-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--muted);
   --color-accent-foreground: var(--foreground);
-  --color-destructive: #b43b3b;
+  --color-destructive: #e89999;
   --color-border: var(--border);
   --color-input: var(--border);
-  --color-ring: #929ca9;
+  --color-ring: #667c98;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
@@ -27,14 +28,14 @@
 }
 
 :root {
-  color-scheme: light;
-  --background: #fff;
-  --foreground: #20252c;
-  --card: #fff;
-  --primary: #253348;
-  --muted: #f2f3f5;
-  --muted-foreground: #6b727d;
-  --border: #e3e5e9;
+  color-scheme: dark;
+  --background: #14171c;
+  --foreground: #e8ebf0;
+  --card: #1b2028;
+  --primary: #3c526f;
+  --muted: #252c36;
+  --muted-foreground: #a0a8b5;
+  --border: #333b47;
 }
 
 @layer base {
@@ -49,7 +50,7 @@
     cursor: pointer;
   }
   :focus-visible {
-    outline: 2px solid #929ca9;
+    outline: 2px solid #667c98;
     outline-offset: 3px;
   }
   [hidden] {
@@ -59,11 +60,11 @@
 
 .settings-shell {
   min-height: 100vh;
-  background: #f8f9fb;
+  background: var(--background);
 }
 .app-header {
   border-bottom: 1px solid var(--border);
-  background: #fff;
+  background: var(--card);
 }
 .popup-shell {
   display: flex;
@@ -96,7 +97,7 @@
 }
 .activity-list {
   scrollbar-width: thin;
-  scrollbar-color: #d9dde3 transparent;
+  scrollbar-color: #46505f transparent;
 }
 .operation-value {
   overflow-wrap: anywhere;
