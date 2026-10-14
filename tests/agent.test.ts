@@ -67,7 +67,7 @@ function installChrome(page: Page) {
   removed.length = 0;
   const chromeMock = {
     tabs: {
-      get: vi.fn(async () => ({ id: 7, url: 'https://example.com/', status: 'complete' })),
+      get: vi.fn(async (_tabId?: number) => ({ id: 7, url: 'https://example.com/', status: 'complete' })),
       sendMessage: vi.fn(async (_tabId: number, msg: any) => {
         page.sent.push(msg);
         switch (msg.type) {
@@ -85,6 +85,7 @@ function installChrome(page: Page) {
       onCreated: { addListener: vi.fn((fn: any) => { created.push(fn); }) },
       onRemoved: { addListener: vi.fn((fn: any) => { removed.push(fn); }) },
       update: vi.fn(async (_id: number, _changes: chrome.tabs.UpdateProperties) => ({})),
+      create: vi.fn(async (_properties: chrome.tabs.CreateProperties) => ({ id: 8, url: 'https://example.com/' })),
       query: vi.fn(),
     },
     scripting: { executeScript: vi.fn() },
@@ -264,13 +265,16 @@ describe('AgentRunner', () => {
     expect(r.getProgress().currentStep).toBe(5);
   });
 
-  it('refuses internal browser pages', async () => {
+  it('does not observe an internal page when choosing a starting URL fails', async () => {
     const chromeMock = installChrome(page);
     chromeMock.tabs.get.mockResolvedValue({ id: 7, url: 'chrome://extensions', status: 'complete' } as any);
     const r = runner();
+    startingUrl.mockRejectedValueOnce(new Error('No API key for starting URL'));
     await r.start('Anything', 7);
     expect(r.getProgress().status).toBe('error');
-    expect(r.getProgress().lastError).toMatch(/internal browser page/);
+    expect(r.getProgress().lastError).toMatch(/No API key/);
+    expect(chromeMock.tabs.create).not.toHaveBeenCalled();
+    expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
     expect(jev).not.toHaveBeenCalled();
   });
 });
@@ -690,7 +694,7 @@ describe('new-tab startup', () => {
     page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
     browser = installChrome(page);
     url = 'chrome://newtab/';
-    browser.tabs.get.mockImplementation(async () => ({ id: 7, url, status: 'complete' }));
+    browser.tabs.get.mockImplementation(async (id = 7) => ({ id, url: id === 8 ? 'https://example.com/' : url, status: 'complete', windowId: 3 }));
     browser.tabs.update.mockImplementation(async (_id: number, changes: any) => { url = changes.url; return {} as any; });
     startingUrl.mockResolvedValue('https://example.com/');
   });
@@ -729,16 +733,62 @@ describe('new-tab startup', () => {
     expect(browser.tabs.update).not.toHaveBeenCalled();
   });
 
-  it.each(['chrome://settings/', 'chrome://extensions/', 'chrome-extension://other/options.html'])('refuses %s before debugger attachment', async (internal) => {
+  it.each(['chrome://settings/', 'chrome://extensions/?id=extension', 'chrome-extension://other/options.html', 'devtools://devtools/', 'view-source:https://example.com/'])('opens a web tab from %s without touching the original page', async (internal) => {
     url = internal;
-    const attach = vi.fn();
-    vi.stubGlobal('chrome', { ...browser, debugger: { attach, onDetach: { addListener: vi.fn() } } });
+    const r = runner();
+    await r.step('Find flights', 7);
+    expect(r.getProgress().status).toBe('paused');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(r.getProgress().inputNote).toBeUndefined();
+    expect(browser.tabs.create).toHaveBeenCalledWith({ url: 'https://example.com/', active: true, windowId: 3 });
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(browser.tabs.sendMessage.mock.calls.every(([id]) => id === 8)).toBe(true);
+    expect(browser.scripting.executeScript).not.toHaveBeenCalled();
+    expect(url).toBe(internal);
+    expect(jev).not.toHaveBeenCalled();
+    // A detached popup still targets the source id; it must resume in the task tab.
+    jev.mockResolvedValue(answer('DONE'));
+    await r.step('Find flights', 7);
+    expect(r.getProgress().status).toBe('done');
+    expect(startingUrl).toHaveBeenCalledOnce();
+    expect(browser.tabs.create).toHaveBeenCalledOnce();
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, msg]) => msg.type === 'CONTENT_OBSERVE')[0][0]).toBe(8);
+  });
+
+  it('Run continues in the newly created task tab', async () => {
+    url = 'chrome://extensions/';
+    jev.mockResolvedValue(answer('DONE'));
+    const r = runner();
+    await r.start('Find flights', 7);
+    expect(r.getProgress().status).toBe('done');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(browser.tabs.create).toHaveBeenCalledOnce();
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, msg]) => msg.type === 'CONTENT_OBSERVE')[0][0]).toBe(8);
+  });
+
+  it('reports a failure to create a task tab without acting on the internal page', async () => {
+    url = 'chrome://extensions/';
+    browser.tabs.create.mockRejectedValueOnce(new Error('Could not create tab'));
     const r = runner();
     await r.start('Find flights', 7);
     expect(r.getProgress().status).toBe('error');
-    expect(r.getProgress().inputNote).toBeUndefined();
-    expect(startingUrl).not.toHaveBeenCalled();
-    expect(attach).not.toHaveBeenCalled();
+    expect(r.getProgress().lastError).toContain('Could not create tab');
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(jev).not.toHaveBeenCalled();
+  });
+
+  it('stops before opening a task tab when Stop is pressed during URL selection', async () => {
+    url = 'chrome://extensions/';
+    let complete!: (value: string) => void;
+    startingUrl.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const r = runner();
+    const run = r.start('Find flights', 7);
+    await vi.waitFor(() => expect(startingUrl).toHaveBeenCalledOnce());
+    r.stop();
+    complete('https://example.com/');
+    await run;
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+    expect(r.getProgress().status).toBe('idle');
   });
 
   it.each(['No API key', 'Starting URL helper returned invalid JSON'])('leaves the tab unchanged on helper failure: %s', async (message) => {

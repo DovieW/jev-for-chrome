@@ -99,6 +99,8 @@ export class AgentRunner {
   private settings: AppSettings = DEFAULT_SETTINGS;
   private history: RecentAction[] = [];
   private activeTabId: number | null = null;
+  /** The popup may keep targeting the original tab after bootstrap opens a task tab. */
+  private startTabId: number | null = null;
   private runToken = 0;
 
   private lastFingerprint: string | null = null;
@@ -184,6 +186,7 @@ export class AgentRunner {
   private reset(goal: string, tabId: number): void {
     this.runToken++;
     this.activeTabId = tabId;
+    this.startTabId = tabId;
     this.inputAttemptedTab = null;
     this.history = [];
     this.lastFingerprint = null;
@@ -222,7 +225,7 @@ export class AgentRunner {
   /** Executes exactly one step. A new goal, or a finished run, starts over; a paused run continues. */
   public async step(goal: string, tabId: number): Promise<void> {
     if (this.progress.status === 'running') return;
-    const continuing = this.progress.status === 'paused' && goal === this.progress.goal && tabId === this.activeTabId;
+    const continuing = this.progress.status === 'paused' && goal === this.progress.goal && (tabId === this.activeTabId || tabId === this.startTabId);
     if (!continuing) {
       this.reset(goal, tabId);
     } else {
@@ -303,7 +306,8 @@ export class AgentRunner {
     const tab = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
     const originalUrl = tab.pendingUrl || tab.url || '';
-    if (!isStartingPage(originalUrl)) return false;
+    const replaceTab = isStartingPage(originalUrl);
+    if (!replaceTab && !INTERNAL_PREFIXES.some((prefix) => originalUrl.startsWith(prefix))) return false;
     const started = Date.now();
     const url = await generateStartingUrl(this.settings, this.progress.goal);
     if (token !== this.runToken) return true;
@@ -312,15 +316,29 @@ export class AgentRunner {
     if ((current.pendingUrl || current.url || '') !== originalUrl) {
       throw new Error('The tab changed while choosing a starting URL. Start a new run on the current page.');
     }
-    await chrome.tabs.update(tabId, { url });
+    let taskTabId = tabId;
+    if (replaceTab) {
+      await chrome.tabs.update(tabId, { url });
+    } else {
+      // Chrome's own UI cannot be observed. Keep it open and start on a normal web tab.
+      // No opener is set: closing the task tab must not send the agent back into Chrome UI.
+      const taskTab = await chrome.tabs.create({ url, active: true, ...(current.windowId !== undefined ? { windowId: current.windowId } : {}) });
+      if (token !== this.runToken) return true;
+      if (taskTab.id === undefined) throw new Error('Could not identify the new task tab.');
+      taskTabId = taskTab.id;
+      this.activeTabId = taskTabId;
+      this.lastFingerprint = null;
+      this.lastSummary = null;
+      this.inputAttemptedTab = null;
+    }
     if (token !== this.runToken) return true;
     this.progress.currentStep++;
     this.history.push({ step: this.progress.currentStep, action: `NAVIGATE ${url}`, kind: 'navigate', url, page_changed: true, outcome: `navigated to ${url}` });
-    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'NAVIGATE', targetLabel: 'Starting URL chosen by text helper', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
+    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'NAVIGATE', targetLabel: replaceTab ? 'Starting URL chosen by text helper' : 'Opened a task tab', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
     this.broadcastUpdate();
-    await this.waitForTabToLoad(tabId);
+    await this.waitForTabToLoad(taskTabId);
     if (token !== this.runToken) return true;
-    await this.ensureContentScriptReady(tabId);
+    await this.ensureContentScriptReady(taskTabId);
     return true;
   }
 

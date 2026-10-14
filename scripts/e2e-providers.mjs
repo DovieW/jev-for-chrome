@@ -162,15 +162,15 @@ try {
   await options.setViewportSize({ width: 1280, height: 900 });
   console.log('PASS keyboard provider selects, connection tests, saved tier, zero delay, switches, discard/reset, and responsive layout');
 
-  async function newTabPopup() {
-    const tab = await worker.evaluate(() => chrome.tabs.create({ url: 'chrome://newtab/' }));
-    const page = context.pages().find((p) => p.url().startsWith('chrome://newtab')) || await context.waitForEvent('page');
+  async function newTabPopup(sourceUrl = 'chrome://newtab/') {
+    const tab = await worker.evaluate((url) => chrome.tabs.create({ url }), sourceUrl);
+    const page = context.pages().find((p) => p.url().startsWith(sourceUrl)) || await context.waitForEvent('page');
     const popup = await context.newPage();
     await popup.goto(`chrome-extension://${extension}/popup.html?tabId=${tab.id}`);
     await popup.locator('textarea').fill('Enter blue widgets into the Search field');
     assert.match(await popup.locator('body').innerText(), /OpenAI Decisions/);
     assert.match(await popup.locator('body').innerText(), /gpt-6-luna/);
-    return { popup, page };
+    return { popup, page, tabId: tab.id };
   }
   const progress = () => options.evaluate(async () => (await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' })).progress);
   const step = await newTabPopup();
@@ -211,6 +211,37 @@ try {
 
   await run.page.close();
   await run.popup.close();
+  for (const mode of ['Step', 'Run task']) {
+    const sourceUrl = `chrome://extensions/?id=${extension}`;
+    const internal = await newTabPopup(sourceUrl);
+    await internal.popup.getByRole('button', { name: mode, exact: true }).click();
+    const taskPage = await poll(() => Promise.resolve(context.pages().find((page) => page.url() === origin + '/search.html')), (page) => !!page);
+    const source = await worker.evaluate((id) => chrome.tabs.get(id), internal.tabId);
+    assert.equal(source.url, sourceUrl, 'The Chrome extensions page is preserved');
+    if (mode === 'Step') {
+      state = await poll(progress, (p) => p.status === 'paused' || p.status === 'error');
+      assert.equal(state.status, 'paused', state.lastError);
+      assert.equal(state.currentStep, 1);
+      assert.equal(state.logs[0].targetLabel, 'Opened a task tab');
+      // This popup still passes the internal source id when stepping again.
+      await internal.popup.getByRole('button', { name: 'Step', exact: true }).click();
+      state = await poll(progress, (p) => p.status === 'paused' && p.currentStep === 2 || p.status === 'error');
+      assert.equal(state.status, 'paused', state.lastError);
+      await internal.popup.getByRole('button', { name: 'Step', exact: true }).click();
+    }
+    state = await poll(progress, (p) => p.status === 'done' || p.status === 'error');
+    assert.equal(state.status, 'done', state.lastError);
+    assert.equal(state.currentStep, 2);
+    assert.equal(state.inputNote, undefined);
+    assert.equal(await taskPage.inputValue('input[name=q]'), 'blue widgets');
+    assert.equal((await worker.evaluate((id) => chrome.tabs.get(id), internal.tabId)).url, sourceUrl);
+    await internal.popup.locator('.popup-shell').screenshot({ path: `.e2e-out/internal-${mode === 'Step' ? 'step' : 'run'}.png` });
+    await taskPage.close();
+    await internal.page.close();
+    await internal.popup.close();
+    console.log(`PASS ${mode} from Chrome extensions opens a task tab, preserves the original, and completes`);
+  }
+
   await worker.evaluate(async () => {
     const { jev_settings } = await chrome.storage.local.get('jev_settings');
     jev_settings.openai.apiKey = '';
@@ -227,7 +258,7 @@ try {
   console.log('PASS keyboard run shortcut and actionable missing-key state');
 
   const texts = requests.filter((r) => r.path === '/chat');
-  assert.equal(texts.length, 5);
+  assert.equal(texts.length, 9);
   for (const { body } of texts) {
     assert.equal(body.model, 'gpt-6-luna');
     assert.equal(body.max_completion_tokens, 1024);

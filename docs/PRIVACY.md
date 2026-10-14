@@ -9,8 +9,8 @@ Jev for Chrome is a browser extension that automates the tab you point it at, us
 - **Nothing happens until you start a run.** The extension reads a tab only after you type a goal into its popup and press Run or Step, and only on that tab.
 - **During a run, each step sends one request to the decision provider you chose** (OpenRouter, TypeSafe, Cloudflare Workers AI or OpenAI Decisions). That request contains: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the list of interactive elements with their labels, current values and link targets, and the last ten actions taken.
 - **When the model decides to type into a field, one request goes to the text model you chose** (OpenRouter, DeepSeek or an OpenAI-compatible endpoint) with the goal, the field's label and the same page text.
-- **Starting from a new or blank tab sends only your goal to the configured text helper** to select an HTTP(S) starting URL. The extension navigates the same tab before reading it or attaching the debugger.
-- **Password fields are never read or filled.** Browser internal pages are refused; Chrome new-tab pages and `about:blank` are navigated to a regular page before observation.
+- **Starting from a new, blank, or internal browser tab sends only your goal to the configured text helper** to select an HTTP(S) starting URL. The extension navigates a blank/new tab or opens a separate task tab for other internal pages, before reading the web page or attaching the debugger.
+- **Password fields are never read or filled.** Browser internal pages are never observed. Chrome new-tab pages and `about:blank` are navigated to a regular page; other internal pages remain open while the extension creates a separate task tab.
 - **Nothing is sent anywhere else.** There is no telemetry, no analytics, no crash reporting and no server operated by the author.
 
 ## What is stored, and where
