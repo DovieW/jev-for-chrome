@@ -312,6 +312,7 @@ export interface AgentProgress {
 
 // Messages between Extension components
 export type ExtensionMessage =
+  | { type: 'VOICE_STATE'; state: import('../voice/types').VoiceState }
   | { type: 'GET_SETTINGS' }
   | { type: 'SETTINGS_RESPONSE'; settings: AppSettings }
   | { type: 'SAVE_SETTINGS'; settings: AppSettings }

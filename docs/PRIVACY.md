@@ -6,16 +6,18 @@ Jev for Chrome is a browser extension that automates the tab you point it at, us
 
 ## What the extension does with data
 
-- **Nothing happens until you start a run.** The extension reads a tab only after you type a goal into its popup and press Run or Step, and only on that tab.
+- **No page observation until you start a run.** The extension reads a tab only after you submit a goal through Run, Step, or a transcribed voice task, and only on that tab.
 - **During a run, each step sends one request to the decision provider you chose** (OpenRouter, TypeSafe, Cloudflare Workers AI or OpenAI Decisions). That request contains: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the list of interactive elements with their labels, current values and link targets, and the last ten actions taken.
 - **When the model decides to type into a field, one request goes to the text model you chose** (OpenRouter, DeepSeek or an OpenAI-compatible endpoint) with the goal, the field's label and the same page text.
 - **Starting from a new, blank, or internal browser tab sends only your goal to the configured text helper** to select an HTTP(S) starting URL. The extension navigates a blank/new tab or opens a separate task tab for other internal pages, before reading the web page or attaching the debugger.
+- **Voice tasks capture microphone audio only after you invoke the shortcut or microphone button.** A visible panel shows recording status and a live waveform. Sending the recording uploads it to OpenAI’s `gpt-4o-mini-transcribe` transcription endpoint; the returned transcript becomes the task goal. Escape or Cancel during recording discards it without uploading. During transcription, cancelling aborts the request and prevents its transcript from starting a task. Recordings are capped at two minutes.
 - **Password fields are never read or filled.** Browser internal pages are never observed. Chrome new-tab pages and `about:blank` are navigated to a regular page; other internal pages remain open while the extension creates a separate task tab.
 - **Nothing is sent anywhere else.** There is no telemetry, no analytics, no crash reporting and no server operated by the author.
 
 ## What is stored, and where
 
 - Your API keys and settings are stored in `chrome.storage.local` on your device only. They are sent solely to the provider they belong to, as an authorization header. An empty helper key may reuse the matching OpenRouter key or, for the official OpenAI endpoint only, the OpenAI Decisions key. Custom compatible endpoints require their own helper key.
+- Recordings are held only in the extension recorder’s memory. They are deleted after a successful handoff or cancellation; a failed transcription may be retried until you cancel. Audio is not saved to browser storage or disk.
 - Run logs (the decisions shown in the popup) are kept in memory while the extension's service worker is alive and are discarded afterwards. "Copy trace" puts a run on your clipboard only when you click it.
 
 ## Third parties
@@ -25,6 +27,7 @@ The providers you configure process the data described above under their own ter
 ## Permissions
 
 - `activeTab`, `tabs`, `scripting` and the `<all_urls>` host permission: needed to read the tab you started a run on, to inject the page script that executes clicks and typing, and to follow a link that opens a new tab. They are not used on other tabs.
+- `offscreen`: to capture microphone audio and compute its waveform in an extension document. Chrome separately asks for microphone access in a visible extension setup window.
 - `storage`: to keep your settings and keys on your device.
 - `debugger`: to send the clicks and keystrokes of a run to that tab through Chrome's DevTools protocol, so the page receives real user input. It is attached only while a run is active on that tab and detached when the run ends. Nothing is read through it. Chrome shows a "started debugging" bar on the tab while it is attached; you can turn the feature off in Options (Chrome does not allow this permission to be optional).
 

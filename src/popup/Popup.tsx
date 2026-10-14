@@ -12,6 +12,7 @@ import {
   Clock3,
   CircleAlert,
   ListFilter,
+  Mic,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -249,20 +250,18 @@ export const Popup: React.FC = () => {
             step: `${progress.currentStep}/${progress.maxSteps}`,
             error: progress.lastError,
             provider: settings.activeProvider,
-            steps: [...progress.logs]
-              .reverse()
-              .map((log) => ({
-                step: log.step,
-                operation: log.operation,
-                target: log.targetLabel,
-                targetId: log.targetId,
-                text: log.targetValue,
-                confidence: log.confidence,
-                latencyMs: log.latencyMs,
-                probabilities: log.probabilities,
-                goalDone: log.goalDone,
-                stuck: log.stuck,
-              })),
+            steps: [...progress.logs].reverse().map((log) => ({
+              step: log.step,
+              operation: log.operation,
+              target: log.targetLabel,
+              targetId: log.targetId,
+              text: log.targetValue,
+              confidence: log.confidence,
+              latencyMs: log.latencyMs,
+              probabilities: log.probabilities,
+              goalDone: log.goalDone,
+              stuck: log.stuck,
+            })),
           },
           null,
           2,
@@ -283,17 +282,44 @@ export const Popup: React.FC = () => {
     <div className="popup-shell">
       <header className="flex items-center justify-between border-b px-5 py-4">
         <Brand compact />
-        <Hint text="Settings">
-          <Button
-            aria-label="Settings"
-            size="icon-sm"
-            variant="ghost"
-            className="text-muted-foreground"
-            onClick={() => chrome.runtime.openOptionsPage()}
-          >
-            <Settings2 className="size-4" />
-          </Button>
-        </Hint>
+        <div className="flex items-center gap-1">
+          <Hint text="Record a voice task">
+            <Button
+              aria-label="Record a voice task"
+              size="icon-sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              onClick={async () => {
+                try {
+                  const result = await sendMessage<{
+                    success: boolean;
+                    error?: string;
+                  }>({ type: "VOICE_TOGGLE_REQUEST", tabId: targetTabId() });
+                  if (!result.success)
+                    throw new Error(
+                      result.error || "Could not open voice recording.",
+                    );
+                  window.close();
+                } catch (error) {
+                  setMessage((error as Error).message);
+                }
+              }}
+            >
+              <Mic className="size-4" />
+            </Button>
+          </Hint>
+          <Hint text="Settings">
+            <Button
+              aria-label="Settings"
+              size="icon-sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              onClick={() => chrome.runtime.openOptionsPage()}
+            >
+              <Settings2 className="size-4" />
+            </Button>
+          </Hint>
+        </div>
       </header>
       <main className="px-5 pt-5">
         <div className="mb-3 flex items-center justify-between">

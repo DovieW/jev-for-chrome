@@ -35,6 +35,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Brand, sendMessage } from "../ui/app";
 import { activeJevModel, callJevProvider } from "../shared/providers";
+import { voiceApiKey } from "../shared/transcription";
 import {
   describeHelperKey,
   isOfficialOpenAI,
@@ -182,6 +183,7 @@ export const Options: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [ready, setReady] = useState(false);
+  const [voiceShortcut, setVoiceShortcut] = useState("Not assigned");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -193,8 +195,24 @@ export const Options: React.FC = () => {
   const provider = settings.activeProvider;
   const config = settings[provider];
   const helper = describeHelperKey(settings);
+  let voiceReady = false;
+  try {
+    voiceReady = Boolean(voiceApiKey(settings));
+  } catch {
+    /* configured below */
+  }
 
   useEffect(() => {
+    const refreshShortcut = () => {
+      void chrome.commands.getAll().then((commands) => {
+        setVoiceShortcut(
+          commands.find((command) => command.name === "voice-task")?.shortcut ||
+            "Not assigned",
+        );
+      });
+    };
+    refreshShortcut();
+    window.addEventListener("focus", refreshShortcut);
     sendMessage<{ settings: AppSettings }>({ type: "GET_SETTINGS" })
       .then(({ settings }) => {
         setSettings(settings);
@@ -202,6 +220,7 @@ export const Options: React.FC = () => {
         setReady(true);
       })
       .catch((err) => setError(err.message));
+    return () => window.removeEventListener("focus", refreshShortcut);
   }, []);
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -589,6 +608,41 @@ export const Options: React.FC = () => {
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-6">
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="font-medium">Voice tasks</p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Shortcut: <kbd>{voiceShortcut}</kbd>
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            void chrome.tabs.create({
+                              url: "chrome://extensions/shortcuts",
+                            });
+                          }}
+                        >
+                          Change shortcut
+                          <ArrowUpRight />
+                        </Button>
+                      </div>
+                      <p className="text-sm leading-relaxed text-muted-foreground">
+                        Press the shortcut to record, then press it again to
+                        send your spoken task. Escape cancels. Audio goes to
+                        OpenAI’s GPT-4o Mini Transcribe; the transcript runs
+                        with your selected decision provider.
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {voiceReady
+                          ? "Uses your existing OpenAI key. Microphone access is requested the first time."
+                          : "Add an OpenAI key under the text helper or OpenAI Decisions on the Models tab to use voice tasks."}
+                      </p>
+                    </div>
+                    <Separator />
                     <div className="grid max-w-lg gap-5 sm:grid-cols-2">
                       <Field
                         id="max-steps"

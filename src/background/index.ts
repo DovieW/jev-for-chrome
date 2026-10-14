@@ -1,5 +1,6 @@
 import { AppSettings, ExtensionMessage, mergeSettings } from '../shared/types';
 import { AgentRunner } from './agent';
+import { installVoice } from './voice';
 
 const runner = new AgentRunner();
 
@@ -22,6 +23,7 @@ async function refreshRunnerSettings(): Promise<AppSettings> {
 }
 
 refreshRunnerSettings().catch(() => undefined);
+installVoice(runner, getStoredSettings);
 
 /** The tab to act on: an explicit id (detached popup, tests) or the active tab of the current window. */
 async function resolveTabId(explicit?: number): Promise<number> {
@@ -40,6 +42,7 @@ async function resolveTabId(explicit?: number): Promise<number> {
 
 chrome.runtime.onMessage.addListener(
   (message: ExtensionMessage, _sender, sendResponse: (response: unknown) => void) => {
+    if (message.type.startsWith('VOICE_') || 'target' in message) return false;
     (async () => {
       try {
         switch (message.type) {

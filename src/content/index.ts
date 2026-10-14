@@ -8,6 +8,7 @@ import {
   showStatusBanner,
 } from './overlay';
 import { clickRect, getCache, takeSnapshot } from './snapshot';
+import { updateVoicePanel } from './voice';
 
 const failed = (err: any): ActResult => ({ ok: false, code: 'failed', message: err?.message || String(err) });
 
@@ -50,6 +51,11 @@ function boot(): void {
   chrome.runtime.onMessage.addListener(
     (message: ExtensionMessage, _sender, sendResponse: (response: unknown) => void) => {
       switch (message.type) {
+        case 'VOICE_STATE': {
+          updateVoicePanel(message.state);
+          sendResponse({ success: true });
+          return false;
+        }
         case 'PING': {
           sendResponse({ pong: true });
           return false;

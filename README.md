@@ -128,9 +128,11 @@ The **Test** button on each provider sends a tiny real request and shows the ans
 
 ## Use
 
-Click the toolbar icon, type a goal, press **Run**. **Step** executes exactly one action so you can watch decisions one at a time; **Stop** aborts. The page shows numbered badges on the elements the model can see and a small status bar with the current action and its latency.
+Click the toolbar icon, type a goal, press **Run**. **Step** executes exactly one action so you can watch decisions one at a time; **Stop** aborts. Optional **Page labels** show numbered badges on selectable controls; they are off by default.
 
 On a Chrome new-tab page or `about:blank`, the text helper first chooses an HTTP(S) starting URL from your goal. The extension navigates the same tab before reading the page or attaching the debugger. This counts as one `NAVIGATE` step: **Step** navigates and pauses; **Run** continues automatically. Missing helper keys or invalid URLs leave the tab unchanged. From an internal browser page such as `chrome://extensions` or `chrome://settings`, it opens a separate task tab instead, preserving the original page. Run continues in that tab; Step pauses after opening it.
+
+**Voice tasks:** press **Ctrl+Shift+Space** (**Command+Shift+Space** on macOS) to open the bottom-center recording panel. Press the shortcut again or click **Send task** to transcribe and run your spoken goal. **Escape** cancels without sending an unfinished recording. The microphone button in the popup opens the same panel. Chrome requests microphone permission once through an extension setup window. Change the shortcut at `chrome://extensions/shortcuts`; Settings → Behavior shows its current assignment. Voice transcription uses `gpt-4o-mini-transcribe` and reuses the official OpenAI text-helper key, falling back to the official OpenAI Decisions key. Audio stays in memory and is discarded after success or cancellation; failed uploads can be retried. Recordings are limited to two minutes. Starting voice capture on an internal browser page opens a separate Google tab first.
 
 Runs stop on `DONE`, on `BLOCKED`, after three consecutive actions that changed nothing on the page, when the step budget is exhausted, or on any provider error. A `DONE` or `BLOCKED` given with less than 50% confidence is asked once more after the page settles before it counts. A target that turns out to be covered, or a field the text model cannot fill from the goal, is reported back to the model and withheld after two attempts. `DONE` is the model's opinion, not proof; check the page.
 
@@ -138,7 +140,7 @@ Runs stop on `DONE`, on `BLOCKED`, after three consecutive actions that changed 
 
 The full statement is in [docs/PRIVACY.md](docs/PRIVACY.md).
 
-Each step sends one request to the decision provider you chose (OpenRouter, TypeSafe, Cloudflare or OpenAI Decisions) containing: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the table of interactive elements with their labels, current values and link targets, and the last ten actions. When the model decides to type, one request goes to the text model with the goal, the field and the same page text. On a new, blank, or internal browser tab, the starting-URL request sends only your goal to the text helper. Nothing is sent anywhere else; there is no telemetry. API keys stay in `chrome.storage.local` on your machine. Password fields are never read or filled. Internal browser pages are never observed; starting a run there opens a separate web tab. The `<all_urls>` permission exists because the extension has to read the tab you point it at; it does nothing on tabs where you have not started a run. The `debugger` permission is used only to send clicks and keystrokes to the run's tab through the DevTools protocol; Chrome shows a "started debugging" bar on that tab while a run is active, and nothing is read through it.
+Each step sends one request to the decision provider you chose (OpenRouter, TypeSafe, Cloudflare or OpenAI Decisions) containing: your goal, the current tab's URL, title and visible text (up to 6,000 characters), the table of interactive elements with their labels, current values and link targets, and the last ten actions. When the model decides to type, one request goes to the text model with the goal, the field and the same page text. On a new, blank, or internal browser tab, the starting-URL request sends only your goal to the text helper. Sending a voice task uploads the recorded microphone audio to OpenAI for transcription; its transcript becomes your goal. Cancelled recordings are discarded. There is no telemetry. API keys stay in `chrome.storage.local` on your machine. Password fields are never read or filled. Internal browser pages are never observed; starting a run there opens a separate web tab. The `<all_urls>` permission exists because the extension has to read the tab you point it at; page observation is limited to the run’s tab, and the voice panel appears only when you invoke recording. The `debugger` permission is used only to send clicks and keystrokes to the run's tab through the DevTools protocol; Chrome shows a "started debugging" bar on that tab while a run is active, and nothing is read through it.
 
 ## What is and isn't handled
 
@@ -165,6 +167,7 @@ npm run check      # typecheck + unit tests + production build
 npm test           # vitest
 npm run typecheck
 npm run e2e:providers  # built extension, mocked OpenAI APIs and local pages
+npm run e2e:voice      # synthetic microphone, real recorder/UI, local API mocks
 ```
 
 Tests cover the action space and answer validation, provider adapters and retry policy, the text helper parser, DOM snapshot classification, the content script boot guard, the in-page executor (jsdom) and the agent loop (mocked `chrome`). They never call a paid API. `scripts/test_live_e2e.ts` runs two real requests when `OPENROUTER_API_KEY` is set.

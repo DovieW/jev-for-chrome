@@ -30,6 +30,8 @@ const referenced = [
   manifest.action?.default_popup,
   manifest.options_page,
   manifest.options_ui?.page,
+  'offscreen.html',
+  'microphone.html',
   ...Object.values(manifest.icons ?? {}),
   ...Object.values(manifest.action?.default_icon ?? {}),
   ...(manifest.content_scripts ?? []).flatMap((c) => [...(c.js ?? []), ...(c.css ?? [])]),

@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Jev microphone access</title>
+    <link rel="stylesheet" href="/src/voice/microphone.css" />
+  </head>
+  <body>
+    <main>
+      <img src="/icon48.png" width="40" height="40" alt="" />
+      <h1>Speak your next task</h1>
+      <p>
+        Allow Jev to use your microphone. Recordings are sent to OpenAI for
+        transcription when you send a voice task.
+      </p>
+      <button id="allow">Allow microphone</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </main>
+    <script type="module" src="/src/voice/microphone.ts"></script>
+  </body>
+</html>
