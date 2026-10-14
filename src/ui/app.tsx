@@ -1,4 +1,3 @@
-import { Compass } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -18,9 +17,7 @@ export const PROVIDER_LABELS: Record<JevProviderType, string> = {
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
-      <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-        <Compass className="size-[18px]" aria-hidden="true" />
-      </span>
+      <img src="icon32.png" className="size-8" alt="" aria-hidden="true" />
       <span
         className={cn(
           "font-semibold tracking-tight",

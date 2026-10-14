@@ -1,68 +1,58 @@
-// Renders assets/icon.svg into everything that needs the logo, using Playwright's Chromium
-// (npx playwright install chromium) so no native image library is required:
-//   public/icon{16,32}.png   toolbar sizes: emblem on a dark tile so it reads on light and dark toolbars
-//   public/icon{48,128}.png  full-colour emblem on a transparent background, centred with even padding
-//   assets/logo.png          512 px, transparent, centred (README, listings)
-//   docs/store/promo-440x280.png  Chrome Web Store small promo tile
-// The emblem is centred by its rendered pixel bounds, so the source SVG needs no manual offsets.
+// Render the shared SVG brand mark with Chromium; no image-library dependency.
+// Run npm run icons after editing assets/icon.svg.
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
 const svg = fs.readFileSync('assets/icon.svg', 'utf8');
-const TILE = '#0f172a';
-const browser = await chromium.launch({ channel: process.env.CHROMIUM_PATH ? undefined : 'chromium', executablePath: process.env.CHROMIUM_PATH || undefined, headless: true, args: ['--no-sandbox', '--disable-gpu'] });
-const page = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
-await page.setContent('<html><body style="margin:0"></body></html>');
+const browser = await chromium.launch({
+  channel: process.env.CHROMIUM_PATH ? undefined : 'chromium',
+  executablePath: process.env.CHROMIUM_PATH || undefined,
+  headless: true,
+  args: ['--no-sandbox', '--disable-gpu'],
+});
+try {
+  const page = await browser.newPage({ deviceScaleFactor: 1 });
+  await page.setContent('<html><body style="margin:0"></body></html>');
+  const renders = await page.evaluate(async (svg) => {
+    const img = new Image();
+    img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+    await img.decode();
+    const out = {};
+    for (const [file, size, pad] of [
+      ['public/icon16.png', 16, 0],
+      ['public/icon32.png', 32, 0],
+      ['public/icon48.png', 48, 0],
+      ['public/icon128.png', 128, 16],
+      ['assets/logo.png', 512, 0],
+    ]) {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, pad, pad, size - pad * 2, size - pad * 2);
+      out[file] = canvas.toDataURL('image/png');
+    }
+    return out;
+  }, svg);
+  for (const [file, dataUrl] of Object.entries(renders)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
+    console.log(file);
+  }
 
-const renders = await page.evaluate(async ({ svg, TILE }) => {
-  const img = new Image();
-  img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
-  await img.decode();
-  // Measure the emblem's real bounds at high resolution.
-  const M = 1024;
-  const probe = document.createElement('canvas'); probe.width = M; probe.height = M;
-  const pc = probe.getContext('2d'); pc.drawImage(img, 0, 0, M, M);
-  const d = pc.getImageData(0, 0, M, M).data;
-  let x0 = M, y0 = M, x1 = -1, y1 = -1;
-  for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) if (d[(y * M + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-  const out = {};
-  const draw = (size, { tile, pad }) => {
-    const c = document.createElement('canvas'); c.width = size; c.height = size;
-    const ctx = c.getContext('2d');
-    if (tile) { ctx.fillStyle = TILE; const r = size * 0.22; ctx.beginPath(); ctx.roundRect(0, 0, size, size, r); ctx.fill(); }
-    const inner = size * (1 - 2 * pad);
-    const s = inner / Math.max(bw, bh);
-    const dw = bw * s, dh = bh * s;
-    const dx = (size - dw) / 2, dy = (size - dh) / 2;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, x0 / M * img.width, y0 / M * img.height, bw / M * img.width, bh / M * img.height, dx, dy, dw, dh);
-    return c.toDataURL('image/png');
-  };
-  out['public/icon16.png'] = draw(16, { tile: true, pad: 0.08 });
-  out['public/icon32.png'] = draw(32, { tile: true, pad: 0.08 });
-  out['public/icon48.png'] = draw(48, { tile: false, pad: 0.06 });
-  out['public/icon128.png'] = draw(128, { tile: false, pad: 0.125 }); // content inside the central 96 px, per store guidance
-  out['assets/logo.png'] = draw(512, { tile: false, pad: 0.04 });
-  return { out, bounds: { x0, y0, bw, bh, M } };
-}, { svg, TILE });
-for (const [file, dataUrl] of Object.entries(renders.out)) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, Buffer.from(dataUrl.split(',')[1], 'base64'));
-  console.log(file);
+  const logo = fs.readFileSync('assets/logo.png').toString('base64');
+  for (const [file, w, h, size] of [
+    ['docs/store/promo-440x280.png', 440, 280, 160],
+    ['docs/store/promo-1400x560.png', 1400, 560, 300],
+  ]) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.setContent(`<html><body style="margin:0;width:${w}px;height:${h}px;display:flex;align-items:center;justify-content:center;background:#14171c">
+      <img src="data:image/png;base64,${logo}" width="${size}" height="${size}" style="display:block">
+    </body></html>`);
+    await page.screenshot({ path: file });
+    console.log(file);
+  }
+} finally {
+  await browser.close();
 }
-console.log('emblem bounds in 1024 probe:', JSON.stringify(renders.bounds));
-
-// Promotional images follow the store guidance: no text, saturated colour, the artwork fills
-// the region and still reads at half size. Small tile (required) and marquee (optional).
-const logo = fs.readFileSync('assets/logo.png').toString('base64');
-for (const [file, w, h, size] of [['docs/store/promo-440x280.png', 440, 280, 220], ['docs/store/promo-1400x560.png', 1400, 560, 440]]) {
-  await page.setViewportSize({ width: w, height: h });
-  await page.setContent(`<html><body style="margin:0;width:${w}px;height:${h}px;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at 50% 45%, #2d4fb8 0%, #1e3a8a 55%, #172554 100%)">
-    <img src="data:image/png;base64,${logo}" width="${size}" height="${size}" style="display:block;filter:drop-shadow(0 6px 18px rgba(0,0,0,0.35))">
-  </body></html>`);
-  await page.screenshot({ path: file, clip: { x: 0, y: 0, width: w, height: h } });
-  console.log(file);
-}
-await browser.close();
