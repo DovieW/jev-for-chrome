@@ -20,7 +20,9 @@ const server = http.createServer(async (req, res) => {
     let result;
     if (req.url === '/chat') {
       const startup = body.messages[0].content.includes('starting URL');
-      result = { choices: [{ message: { content: JSON.stringify(startup ? { url: origin + '/search.html' } : { text: 'blue widgets' }) } }] };
+      const context = JSON.parse(body.messages[1].content);
+      const text = context.goal === 'Ask for a joke.' ? context.field?.label === 'Search files' ? null : 'Tell me a joke.' : 'blue widgets';
+      result = { choices: [{ message: { content: JSON.stringify(startup ? { url: origin + '/search.html' } : { text }) } }] };
     } else if (req.url === '/typesafe') {
       typeSafeAttempts++;
       if (typeSafeAttempts <= 2) {
@@ -40,11 +42,16 @@ const server = http.createServer(async (req, res) => {
       ) };
     } else {
       const state = JSON.parse(body.input);
-      const filled = state.elements.some((e) => e.value === 'blue widgets');
+      const joke = state.task === 'Ask for a joke.';
+      const filled = state.elements.some((e) => e.value === (joke ? 'Tell me a joke.' : 'blue widgets'));
       let operation = state.task === 'Connection test' ? 'CLICK' : filled ? 'DONE' : 'TYPE_TEXT';
+      const offeredOperations = body.questions.find(q => q.name === 'operation');
+      if (joke && !filled && offeredOperations && !offeredOperations.choices.some(c => c.value === 'TYPE_TEXT')) operation = 'CLICK';
       if (state.task.startsWith('New tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('OPEN_TAB'))) operation='OPEN_TAB';
       if (state.task.startsWith('Open tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('SWITCH_TAB'))) operation='SWITCH_TAB';
-      const selected = q => q.name === 'operation' ? operation : q.name === 'switch_tab_target'
+      const selected = q => q.name === 'operation' ? operation : joke && q.name === 'click_target'
+        ? q.choices.find(c => c.description.includes('Open chat')).value : joke && q.name === 'type_text_target'
+        ? q.choices.find(c => c.description.includes('Chat message'))?.value || q.choices[0].value : q.name === 'switch_tab_target'
         ? q.choices.find(c=>JSON.parse(c.description).title==='Target search')?.value || q.choices[0].value : q.choices[0].value;
       result = {
         model: 'gpt-6-luna',
@@ -340,6 +347,37 @@ try {
   await switcher.locator('.popup-shell').screenshot({path:'.e2e-out/open-tab-switch.png'});
   await source.close(); await target.close(); await decoy.close(); await switcher.close();
   console.log('PASS regular-page OPEN_TAB and existing SWITCH_TAB, stable source popup, and no duplicate target tab');
+
+  // Reproduce the exported run's null helper reply through the actual provider/parser path.
+  const chat = await context.newPage();
+  await chat.goto(origin + '/chat.html');
+  const chatTabId = await worker.evaluate(async url => (await chrome.tabs.query({})).find(t => t.url === url).id, origin + '/chat.html');
+  const chatPopup = await context.newPage();
+  await chatPopup.goto(`chrome-extension://${extension}/popup.html?tabId=${chatTabId}`);
+  const requestStart = requests.length;
+  await chatPopup.locator('textarea').fill('Ask for a joke.');
+  await chatPopup.getByRole('button', { name: 'Run task', exact: true }).click();
+  state = await poll(progress, p => ['done', 'blocked', 'error'].includes(p.status));
+  assert.equal(state.status, 'done', state.lastError);
+  assert.equal(state.currentStep, 2, 'The rejected field never consumes an action step');
+  assert.equal(await chat.getByLabel('Search files', { exact: true }).inputValue(), '');
+  assert.equal(await chat.evaluate(() => document.querySelector('#search').dataset.written), undefined);
+  assert.equal(await chat.getByLabel('Chat message', { exact: true }).inputValue(), 'Tell me a joke.');
+  const chatRequests = requests.slice(requestStart);
+  const helperFields = chatRequests.filter(r => r.path === '/chat').map(r => JSON.parse(r.body.messages[1].content).field.label);
+  assert.deepEqual(helperFields, ['Search files', 'Chat message']);
+  const operationRequests = chatRequests.filter(r => r.path === '/decisions' && r.body.questions.some(q => q.name === 'operation'));
+  assert.equal(operationRequests.length, 4);
+  const reconsider = operationRequests[1].body.questions.find(q => q.name === 'operation');
+  assert.ok(!reconsider.choices.some(c => c.value === 'TYPE_TEXT'), 'The sole rejected typing target is excluded');
+  assert.match(JSON.parse(reconsider.instructions).ineffective_action_alert, /No value for the field "Search files"/);
+  const recovered = (await options.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_RUN_HISTORY' }))).runs[0];
+  assert.equal(recovered.status, 'done');
+  assert.ok(recovered.nodes.some(n => n.label === 'Field rejected by text helper' && n.status === 'skipped'));
+  assert.equal(recovered.nodes.filter(n => n.kind === 'helper' && n.status === 'error').length, 1);
+  await chatPopup.locator('.popup-shell').screenshot({ path: '.e2e-out/null-helper-recovery.png' });
+  await chat.close(); await chatPopup.close();
+  console.log('PASS null text helper recovery: excludes Search files, clicks Open chat, fills Chat message, and records the skipped field');
 
   // A dense inbox-like page must recover without dropping or renumbering controls.
   await worker.evaluate(async (endpoint) => {

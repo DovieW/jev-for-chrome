@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createFieldContext, generateFieldText, generateStartingUrl, describeHelperKey, parseFieldText } from '../src/shared/text-helper';
+import { createFieldContext, generateFieldText, generateStartingUrl, describeHelperKey, parseFieldText, NoFieldValueError } from '../src/shared/text-helper';
 import { AppSettings, DEFAULT_SETTINGS, mergeSettings, PageAction, TEXT_HELPER_PRESETS } from '../src/shared/types';
 
 const okResponse = (content: string) => ({
@@ -106,7 +106,7 @@ describe('Text Helper (TYPE_TEXT value generator)', () => {
     };
     await expect(
       generateFieldText(settings, { goal: 'g', field: {}, page: { title: '', text: '' }, recent_actions: [] })
-    ).rejects.toThrow(/no value/);
+    ).rejects.toBeInstanceOf(NoFieldValueError);
   });
 
   it('surfaces provider errors instead of silently switching models', async () => {
@@ -122,6 +122,14 @@ describe('Text Helper (TYPE_TEXT value generator)', () => {
   });
 
   describe('parseFieldText', () => {
+    it.each(['{"text":null}', '```json\n{"text": null}\n```'])('classifies a null reply as recoverable: %s', raw => {
+      expect(() => parseFieldText(raw)).toThrow(NoFieldValueError);
+    });
+
+    it.each(['not JSON', '{}', '{"text":""}', '{"text":42}'])('does not classify a malformed reply as a missing field value: %s', raw => {
+      expect(() => parseFieldText(raw)).toThrow();
+      expect(() => parseFieldText(raw)).not.toThrow(NoFieldValueError);
+    });
     it('accepts a fenced JSON object', () => {
       expect(parseFieldText('```json\n{"text": "Zurich"}\n```')).toBe('Zurich');
     });

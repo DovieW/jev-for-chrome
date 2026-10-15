@@ -1,11 +1,32 @@
 import type { TraceSpan } from './trace';
-import { parseFieldText } from 'jev-dev-kit';
+import { parseFieldText as parseProviderFieldText } from 'jev-dev-kit';
 import { STARTING_URL_PROMPT, TEXT_VALUE_PROMPT } from './prompts';
-
-export { parseFieldText };
 import { OPENROUTER_HEADERS } from './providers/openrouter';
 import { postJson } from './providers/http';
 import { AppSettings, PageAction, RecentAction, TEXT_HELPER_PRESETS } from './types';
+
+/** A valid null reply means this field cannot advance the goal, not a provider failure. */
+export class NoFieldValueError extends Error {
+  constructor() {
+    super('Text provider found no value for this field in the goal; nothing written.');
+    this.name = 'NoFieldValueError';
+  }
+}
+
+export function parseFieldText(rawContent: string): string {
+  // Match the shared parser's fenced-JSON handling, but classify null from the
+  // reply itself instead of coupling recovery to the parser's error wording.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawContent.replace(/```(?:json)?/gi, '').trim());
+  } catch {
+    // The shared parser reports malformed replies below.
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'text' in parsed && parsed.text === null) {
+    throw new NoFieldValueError();
+  }
+  return parseProviderFieldText(rawContent);
+}
 
 export interface FieldContext {
   goal: string;

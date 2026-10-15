@@ -12,6 +12,8 @@ import {
 export interface LoopContext {
   warning?: string;
   suppressedTargetIds?: string[];
+  /** Fields explicitly rejected by the text helper on this unchanged page. */
+  unfillableTargetIds?: string[];
 }
 
 export interface ActionSpaceResult {
@@ -48,8 +50,10 @@ export function buildActionSpace(
   const targets: Record<string, Record<string, PageAction>> = {};
   const controls: Record<string, PageAction> = {};
   const indices: Record<number, string> = {};
+  const unfillable = new Set(loopContext?.unfillableTargetIds || []);
 
   for (const action of actions) {
+    if (action.kind === 'fill' && unfillable.has(action.id)) continue;
     const operation = OP_BY_KIND[action.kind];
     if (!operation) {
       controls[action.id.toUpperCase()] = action;

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Example chat</title></head>
+<body>
+<h1>Example chat</h1>
+<label>Search files <input id="search" type="search" oninput="this.dataset.written = 'true'"></label>
+<button onclick="document.querySelector('#composer').hidden = false; this.hidden = true">Open chat</button>
+<div id="composer" hidden><label>Chat message <textarea></textarea></label></div>
+</body></html>

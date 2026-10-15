@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentRunner } from '../src/background/agent';
 import { callJevProvider } from '../src/shared/providers';
-import { generateFieldText, generateStartingUrl } from '../src/shared/text-helper';
+import { generateFieldText, generateStartingUrl, parseFieldText } from '../src/shared/text-helper';
 import { ActResult, ChoiceQuestion, DEFAULT_SETTINGS, PageAction, PageSnapshot } from '../src/shared/types';
 
 vi.mock('../src/shared/providers', () => ({
@@ -333,13 +333,105 @@ describe('text helper refusal', () => {
     installChrome(page);
     const typeText = { type_text_target: { choice: '2', confidence: 0.8, probabilities: { '2': 1 } } };
     jev.mockResolvedValueOnce(answer('TYPE_TEXT', typeText)).mockResolvedValueOnce(answer('DONE'));
-    textHelper.mockRejectedValueOnce(new Error('Text helper found no value for this field in the goal; nothing typed.'));
+    textHelper.mockImplementationOnce(async () => parseFieldText('{"text":null}'));
     const r = runner();
     await r.start('Reach the Eiffel Tower article using only links', 7);
 
     expect(r.getProgress().status).toBe('done');
     expect(page.sent.filter((m) => m.type === 'CONTENT_ACT')).toHaveLength(0);
     expect((jev.mock.calls[1][1].questions.operation.instructions as any).ineffective_action_alert).toMatch(/No value for the field/);
+    expect((jev.mock.calls[1][1].questions.operation as ChoiceQuestion).criteria).not.toHaveProperty('TYPE_TEXT');
+    expect(jev.mock.calls[1][1].questions).not.toHaveProperty('type_text_target');
+  });
+
+  it('recovers through another control and allows typing again after the page changes', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => {
+      page.snapshot = snapshot({ text: 'Chat composer opened' });
+      return { ok: true, via: 'synthetic' };
+    }, sent: [] };
+    installChrome(page);
+    const typeText = { type_text_target: { choice: '2', confidence: 0.8, probabilities: { '2': 1 } } };
+    jev.mockResolvedValueOnce(answer('TYPE_TEXT', typeText))
+      .mockResolvedValueOnce(answer('CLICK', clickTarget('1')))
+      .mockResolvedValueOnce(answer('TYPE_TEXT', typeText))
+      .mockResolvedValueOnce(answer('DONE'));
+    textHelper.mockImplementationOnce(async () => parseFieldText('{"text":null}'))
+      .mockResolvedValueOnce('Tell me a joke');
+    const r = runner();
+    await r.start('Ask for a joke.', 7);
+    expect(r.getProgress().status).toBe('done');
+    expect(r.getProgress().currentStep).toBe(2);
+    expect(jev.mock.calls[1][1].questions).not.toHaveProperty('type_text_target');
+    expect(jev.mock.calls[2][1].questions).toHaveProperty('type_text_target');
+    const acts = page.sent.filter(m => m.type === 'CONTENT_ACT');
+    expect(acts.map(m => m.action.kind)).toEqual(['click', 'fill']);
+    expect(acts[1].text).toBe('Tell me a joke');
+    expect(textHelper).toHaveBeenCalledTimes(2);
+  });
+
+  it('pauses Step after rejection, retaining the excluded field and feedback for the next Step', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    installChrome(page);
+    jev.mockResolvedValueOnce(answer('TYPE_TEXT', { type_text_target: { choice: '2', confidence: 1, probabilities: { '2': 1 } } }))
+      .mockResolvedValueOnce(answer('CLICK', clickTarget('1')));
+    textHelper.mockImplementationOnce(async () => parseFieldText('{"text":null}'));
+    const r = runner();
+    await r.step('Ask for a joke.', 7);
+    expect(r.getProgress().status).toBe('paused');
+    expect(r.getProgress().currentStep).toBe(0);
+    expect(page.sent.filter(m => m.type === 'CONTENT_ACT')).toHaveLength(0);
+    await r.step('Ask for a joke.', 7);
+    expect(r.getProgress().status).toBe('paused');
+    expect(r.getProgress().currentStep).toBe(1);
+    expect(jev.mock.calls[1][1].questions).not.toHaveProperty('type_text_target');
+    expect(textHelper).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes the field rejection even when a previous browser action also made no progress', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    installChrome(page);
+    jev.mockResolvedValueOnce(answer('CLICK', clickTarget('1')))
+      .mockResolvedValueOnce(answer('TYPE_TEXT', { type_text_target: { choice: '2', confidence: 1, probabilities: { '2': 1 } } }))
+      .mockResolvedValueOnce(answer('DONE'));
+    textHelper.mockImplementationOnce(async () => parseFieldText('{"text":null}'));
+    const r = runner();
+    await r.start('Ask for a joke.', 7);
+    const feedback = (jev.mock.calls[2][1].questions.operation.instructions as any).ineffective_action_alert;
+    expect(feedback).toMatch(/NO visible change/);
+    expect(feedback).toMatch(/No value for the field/);
+    expect(jev.mock.calls[2][1].questions).not.toHaveProperty('type_text_target');
+    expect(r.getProgress().status).toBe('done');
+  });
+
+  it('stops after four consecutive rejected fields without typing or consuming action steps', async () => {
+    const page: Page = { snapshot: snapshot({ actions: Array.from({ length: 5 }, (_, i) => ({ id: `f${i}`, node: i, kind: 'fill', label: `Field ${i}` })) }), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    installChrome(page);
+    jev.mockImplementation(async (_settings, request) => {
+      const key = Object.keys((request.questions.type_text_target as ChoiceQuestion).criteria)[0];
+      return answer('TYPE_TEXT', { type_text_target: { choice: key, confidence: 1, probabilities: { [key]: 1 } } });
+    });
+    textHelper.mockImplementation(async () => parseFieldText('{"text":null}'));
+    const r = runner();
+    await r.start('Ask for a joke.', 7);
+    expect(r.getProgress().status).toBe('blocked');
+    expect(r.getProgress().lastError).toMatch(/several selected fields/);
+    expect(jev).toHaveBeenCalledTimes(4);
+    expect(textHelper.mock.calls.map(([, context]) => context.field.label)).toEqual(['Field 0', 'Field 1', 'Field 2', 'Field 3']);
+    expect(r.getProgress().currentStep).toBe(0);
+    expect(page.sent.filter(m => m.type === 'CONTENT_ACT')).toHaveLength(0);
+  });
+
+  it('keeps malformed helper replies fatal even when their error says nothing written', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    installChrome(page);
+    jev.mockResolvedValueOnce(answer('TYPE_TEXT', { type_text_target: { choice: '2', confidence: 1, probabilities: { '2': 1 } } }));
+    textHelper.mockImplementationOnce(async () => parseFieldText('{"text":""}'));
+    const r = runner();
+    await r.start('Ask for a joke.', 7);
+    expect(r.getProgress().status).toBe('error');
+    expect(r.getProgress().lastError).toMatch(/invalid value/);
+    expect(jev).toHaveBeenCalledTimes(1);
+    expect(page.sent.filter(m => m.type === 'CONTENT_ACT')).toHaveLength(0);
   });
 
   it('still stops on a real helper failure such as a bad API key', async () => {

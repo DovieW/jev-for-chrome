@@ -29,6 +29,14 @@ const sampleActions: PageAction[] = [
 ];
 
 describe('buildActionSpace', () => {
+  it('excludes an unfillable field even when it is the only typing target, preserving clicks', () => {
+    const space = buildActionSpace(sampleActions, 'goal', { unfillableTargetIds: ['e2'] });
+    expect(space.operations.TYPE_TEXT).toBeUndefined();
+    expect(space.targets.TYPE_TEXT).toBeUndefined();
+    expect(space.questions.type_text_target).toBeUndefined();
+    expect(space.elements.find(e => e.index === '2')?.operations).toEqual(['CLICK']);
+    expect(space.targets.CLICK['2'].id).toBe('e3');
+  });
   it('gives one index per node and one target head per operation', () => {
     const space = buildActionSpace(sampleActions, 'Fly from Zurich to London');
 

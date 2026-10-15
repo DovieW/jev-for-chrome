@@ -1,6 +1,6 @@
 import { buildJevRequest, validateChoiceAnswer } from '../shared/action-space';
 import { activeJevModel, callJevProvider } from '../shared/providers';
-import { createFieldContext, generateFieldText, generateStartingUrl } from '../shared/text-helper';
+import { createFieldContext, generateFieldText, generateStartingUrl, NoFieldValueError } from '../shared/text-helper';
 import {
   ActResult,
   AgentProgress,
@@ -168,6 +168,7 @@ export class AgentRunner {
   private consecutiveStale = 0;
   private decisionCount = 0;
   private targetFailureCount = new Map<string, number>();
+  private unfillableTargetIds = new Set<string>();
   private lastTargetActionId: string | null = null;
   private lastStaleNotice: string | null = null;
   private pendingTerminal: string | null = null;
@@ -207,6 +208,7 @@ export class AgentRunner {
     this.consecutiveStale = 0;
     this.decisionCount = 0;
     this.targetFailureCount.clear();
+    this.unfillableTargetIds.clear();
     this.lastTargetActionId = null;
     this.lastStaleNotice = null;
     this.pendingTerminal = null;
@@ -479,6 +481,8 @@ export class AgentRunner {
     // 2. Resolve what the previous action did and detect deadlocks
     const summary = summarize(snapshot);
     const fingerprint = summary.fingerprint;
+    // Reconsider rejected fields after navigation or a visible page change.
+    if (fingerprint !== this.lastFingerprint) this.unfillableTargetIds.clear();
     if (!this.startUrl) this.startUrl = snapshot.url;
     if (this.visitedUrls[this.visitedUrls.length - 1] !== snapshot.url) this.visitedUrls.push(snapshot.url);
     const last = this.history[this.history.length - 1];
@@ -534,9 +538,11 @@ export class AgentRunner {
       for (const a of snapshot.actions) {
         if (a.node !== undefined && `${OP_BY_KIND[a.kind] || ''} ${a.label}` === repeatedAction) suppressedTargetIds.push(a.id);
       }
-    } else if (this.lastStaleNotice) {
-      warning = this.lastStaleNotice;
     }
+    const fieldNotice = this.unfillableTargetIds.size
+      ? 'ATTENTION: Fields rejected by the text helper remain unavailable for TYPE_TEXT on this unchanged page. Choose a different action that advances the goal.'
+      : undefined;
+    warning = [warning, this.lastStaleNotice || fieldNotice].filter(Boolean).join('\n') || undefined;
     this.lastStaleNotice = null;
 
     // 4. Decide
@@ -549,7 +555,7 @@ export class AgentRunner {
       snapshot,
       this.progress.goal,
       this.history,
-      { warning, suppressedTargetIds },
+      { warning, suppressedTargetIds, unfillableTargetIds: [...this.unfillableTargetIds] },
       { start_url: this.startUrl, steps_taken: this.history.length, visited_urls: this.visitedUrls.slice(-6) }
     );
     let tabs: BrowserTab[];
@@ -745,19 +751,25 @@ export class AgentRunner {
         } catch (err: any) {
           if (token !== this.runToken) return false;
           const message = err?.message || String(err);
-          if (!/nothing typed/i.test(message)) {
+          if (!(err instanceof NoFieldValueError)) {
             this.finish('error', `Text helper failed: ${message}`);
             return false;
           }
-          // The helper could not derive a value from the goal: the field is not the way
-          // forward. Tell the model and withhold the field after two attempts.
+          // A valid null is feedback about this field. Do not write or retry it on
+          // the unchanged page; let the decision model choose another way forward.
+          this.pendingText = null;
+          this.unfillableTargetIds.add(targetAction.id);
           this.consecutiveStale++;
+          trace.event('Field rejected by text helper', {
+            target: { id: targetAction.id, label: targetAction.label },
+            reason: 'The helper returned null; no text was written.',
+            next: this.consecutiveStale >= MAX_CONSECUTIVE_STALE ? 'Stop after repeated field rejections' : 'Observe again with this typing target excluded until the page changes',
+          }, 'skipped');
           if (this.consecutiveStale >= MAX_CONSECUTIVE_STALE) {
-            this.finish('error', `Text helper failed: ${message}`);
+            this.finish('blocked', 'The text helper could not supply values for several selected fields. Try a more specific goal or a different page.');
             return false;
           }
-          this.targetFailureCount.set(targetAction.id, (this.targetFailureCount.get(targetAction.id) || 0) + 1);
-          this.lastStaleNotice = `ATTENTION: No value for the field "${targetAction.label}" can be derived from the goal, so TYPE_TEXT there is not possible. Use links, buttons or other controls instead.`;
+          this.lastStaleNotice = `ATTENTION: No value for the field "${targetAction.label}" can be derived from the goal. Nothing was written, and TYPE_TEXT on this field is excluded until the page changes. Choose another field, click, navigate, or switch tabs to advance the goal; choose BLOCKED if no supported action can help.`;
           this.broadcastUpdate();
           return true;
         }
