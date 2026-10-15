@@ -561,6 +561,36 @@ describe('cross-checks and outcomes', () => {
     expect(r.getProgress().logs.map((l) => l.operation)).toEqual(['DONE', 'CLICK', 'DONE (vetoed)']);
   });
 
+  it('bounds alternating DONE/BLOCKED contradictions instead of spending the model-call budget', async () => {
+    const page: Page = { snapshot: snapshot(), act: vi.fn(), sent: [] };
+    installChrome(page);
+    jev.mockImplementation(async (_settings, request) => {
+      const choices = (request.questions.operation as ChoiceQuestion).criteria;
+      const choice = choices.BLOCKED ? 'BLOCKED' : 'DONE';
+      return withChecks(startupAnswer(choice), 0.07, 0);
+    });
+    const r = runner();
+    r.setSettings({ ...DEFAULT_SETTINGS, stepDelayMs: 0, maxSteps: 30 });
+    await r.start('Example', 7);
+    expect(jev).toHaveBeenCalledTimes(2);
+    expect(r.getProgress()).toMatchObject({ status: 'blocked', currentStep: 0 });
+    expect(r.getProgress().lastError).toContain('one reconsideration');
+    expect(page.act).not.toHaveBeenCalled();
+    expect(textHelper).not.toHaveBeenCalled();
+  });
+
+  it('bounds alternating low-confidence verdicts even when cross-checks are absent', async () => {
+    const page: Page = { snapshot: snapshot(), act: vi.fn(), sent: [] };
+    installChrome(page);
+    jev.mockResolvedValueOnce({ ...startupAnswer('DONE'), answers: { operation: { choice: 'DONE', confidence: 0.2, probabilities: { DONE: 1 } } } })
+      .mockResolvedValueOnce({ ...startupAnswer('BLOCKED'), answers: { operation: { choice: 'BLOCKED', confidence: 0.2, probabilities: { BLOCKED: 1 } } } });
+    const r = runner();
+    await r.start('Example', 7);
+    expect(jev).toHaveBeenCalledTimes(2);
+    expect(r.getProgress().status).toBe('blocked');
+    expect(page.act).not.toHaveBeenCalled();
+  });
+
   it('describes outcomes in words and sends run progress in the state', async () => {
     const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
     installChrome(page);
@@ -648,6 +678,24 @@ describe('links that open a new tab', () => {
     expect(r.getProgress().status).toBe('done');
   });
 
+  it('ignores history and user-opened tabs while the model is deciding', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    const browser = installChrome(page);
+    jev.mockImplementationOnce(async () => {
+      created.forEach(fn => fn({ id: 8, openerTabId: 7, url: 'chrome-extension://test/history.html' }));
+      created.forEach(fn => fn({ id: 9, openerTabId: 7, url: 'https://example.com/other' }));
+      return answer('CLICK', clickTarget('1'));
+    }).mockResolvedValueOnce(answer('DONE'));
+    // Extension UI must also be ignored if opened during an action.
+    page.act = () => {
+      created.forEach(fn => fn({ id: 10, openerTabId: 7, pendingUrl: 'chrome-extension://test/history.html' }));
+      return { ok: true, via: 'synthetic' };
+    };
+    await runner().start('Search', 7);
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(browser.tabs.sendMessage.mock.calls.filter(([, msg]) => msg.type === 'CONTENT_OBSERVE').map(([id]) => id)).toEqual([7, 7]);
+  });
+
   it('ignores tabs opened by other tabs or outside a run', async () => {
     const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
     const chromeMock = installChrome(page);
@@ -715,6 +763,52 @@ describe('trusted input (chrome.debugger)', () => {
     expect(r.getProgress().status).toBe('done');
     expect(r.getProgress().inputNote).toBeUndefined();
     expect(debuggerMock.detach).toHaveBeenCalledWith({ tabId: 7 });
+  });
+
+  it('does not attach while observing or deciding, and releases before the next model call', async () => {
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    const { debuggerMock } = installDebugger(page);
+    jev.mockImplementationOnce(async () => {
+      expect(debuggerMock.attach).not.toHaveBeenCalled();
+      return answer('CLICK', clickTarget('1'));
+    }).mockImplementationOnce(async () => {
+      expect(debuggerMock.detach).toHaveBeenCalledWith({ tabId: 7 });
+      return answer('DONE');
+    });
+    await runner().start('Search', 7);
+    expect(debuggerMock.attach).toHaveBeenCalledTimes(1);
+  });
+
+  it('never attaches for a task that only observes and finishes', async () => {
+    const page: Page = { snapshot: snapshot(), act: vi.fn(), sent: [] };
+    const { debuggerMock } = installDebugger(page);
+    jev.mockResolvedValue(answer('DONE'));
+    await runner().start('Example', 7);
+    expect(debuggerMock.attach).not.toHaveBeenCalled();
+  });
+
+  it('releases failed preparation and does not keep a debugger session during reconsideration', async () => {
+    const page: Page = { snapshot: snapshot(), act: vi.fn(), sent: [] };
+    const { debuggerMock } = installDebugger(page, { prepare: () => ({ ok: false, code: 'covered', message: 'Covered' }) });
+    jev.mockResolvedValueOnce(answer('CLICK', clickTarget('1'))).mockImplementationOnce(async () => {
+      expect(debuggerMock.detach).toHaveBeenCalledWith({ tabId: 7 });
+      return answer('BLOCKED');
+    });
+    await runner().start('Search', 7);
+    expect(debuggerMock.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('stopping during attachment releases the late session and sends no input', async () => {
+    const page: Page = { snapshot: snapshot(), act: vi.fn(), sent: [] };
+    const { debuggerMock } = installDebugger(page);
+    const r = runner();
+    debuggerMock.attach.mockImplementation(async () => { r.stop(); });
+    jev.mockResolvedValue(answer('CLICK', clickTarget('1')));
+    await r.start('Search', 7);
+    expect(debuggerMock.detach).toHaveBeenCalledWith({ tabId: 7 });
+    expect(debuggerMock.sendCommand).not.toHaveBeenCalled();
+    expect(page.sent.some(m => ['CONTENT_ACT', 'CONTENT_PREPARE', 'CONTENT_DISPATCH'].includes(m.type))).toBe(false);
+    expect(r.getProgress().status).toBe('idle');
   });
 
   it('types by clicking the field and inserting the helper text as one trusted input', async () => {

@@ -246,6 +246,41 @@ describe("persistent run history", () => {
     ).toBeLessThanOrEqual(MAX_RUN_BYTES);
   });
 
+  it("retains actual API bodies before duplicate prepared states and observations", async () => {
+    const store = new RunHistoryStore(storage(), () => {});
+    const record = recorder(store);
+    const body = { model: 'test-model', input: '漢'.repeat(50000), questions: [{ name: 'operation' }] };
+    for (let i = 0; i < 4; i++) {
+      record.span('observe', 'Page snapshot').end({ text: body.input });
+      const decision = record.span('decision', 'Prepared decision', { state: body.input });
+      decision.child('request', 'Actual API request', body).end({ httpStatus: 200, response: { answers: ['DONE'] } });
+      decision.end({ answers: ['DONE'] });
+    }
+    record.finish('done', 0);
+    await record.flush();
+    const [saved] = await store.list();
+    expect(saved.truncated).toBe(true);
+    expect(new TextEncoder().encode(JSON.stringify(saved)).length).toBeLessThanOrEqual(MAX_RUN_BYTES);
+    for (const request of saved.nodes.filter(node => node.kind === 'request')) {
+      expect(request.input).toEqual(body);
+      expect(request.output).toMatchObject({ httpStatus: 200, response: { answers: ['DONE'] } });
+    }
+    // Repeated checkpoints must not subsequently discard the surviving wire data.
+    await record.flush();
+    expect((await store.list())[0]).toEqual(saved);
+  });
+
+  it("keeps the model and explicit omission reason when even the API bodies exceed the limit", async () => {
+    const store = new RunHistoryStore(storage(), () => {});
+    const record = recorder(store);
+    record.span('request', 'Large request', { model: 'test-model', input: 'x'.repeat(MAX_RUN_BYTES) }).end({ httpStatus: 200 });
+    record.finish('done', 0);
+    await record.flush();
+    const [saved] = await store.list();
+    expect(saved.nodes[0].input).toMatchObject({ model: 'test-model', omitted: expect.stringContaining('size limit'), originalBytes: expect.any(Number) });
+    expect(new TextEncoder().encode(JSON.stringify(saved)).length).toBeLessThanOrEqual(MAX_RUN_BYTES);
+  });
+
   it("reports persistence errors without failing the recorder or overwriting settings", async () => {
     const disk = storage();
     const store = new RunHistoryStore(disk, () => {});

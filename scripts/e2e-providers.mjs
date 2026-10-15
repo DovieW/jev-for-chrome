@@ -50,6 +50,7 @@ const server = http.createServer(async (req, res) => {
       if (joke && !filled && offeredOperations && !offeredOperations.choices.some(c => c.value === 'TYPE_TEXT')) operation = 'CLICK';
       if (state.task.startsWith('New tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('OPEN_TAB'))) operation='OPEN_TAB';
       if (state.task.startsWith('Open tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('SWITCH_TAB'))) operation='SWITCH_TAB';
+      if (state.task === 'Terminal loop regression') operation = offeredOperations?.choices.some(c => c.value === 'BLOCKED') ? 'BLOCKED' : 'DONE';
       const selected = q => q.name === 'operation' ? operation : joke && q.name === 'click_target'
         ? q.choices.find(c => c.description.includes('Open chat')).value : joke && q.name === 'type_text_target'
         ? q.choices.find(c => c.description.includes('Chat message'))?.value || q.choices[0].value : q.name === 'switch_tab_target'
@@ -307,6 +308,32 @@ try {
     s.openai.apiKey='dummy-openai'; s.textHelper.apiKey='dummy-openai';
     await chrome.storage.local.set({jev_settings:s});
   });
+  // Reproduce mutually contradictory terminal decisions using actual worker requests.
+  const looping = await context.newPage();
+  await looping.goto(origin + '/search.html');
+  const loopingId = await worker.evaluate(async url => (await chrome.tabs.query({})).find(t => t.url === url).id, origin + '/search.html');
+  const loopPopup = await context.newPage();
+  await loopPopup.goto(`chrome-extension://${extension}/popup.html?tabId=${loopingId}`);
+  await loopPopup.locator('textarea').fill('Terminal loop regression');
+  const loopRequestsBefore = requests.length;
+  await worker.evaluate(() => {
+    globalThis.debuggerAttaches = 0;
+    const original = chrome.debugger.attach.bind(chrome.debugger);
+    chrome.debugger.attach = (...args) => { globalThis.debuggerAttaches++; return original(...args); };
+  });
+  await loopPopup.getByRole('button', { name: 'Run task', exact: true }).click();
+  state = await poll(progress, p => ['blocked', 'error', 'done'].includes(p.status));
+  assert.equal(state.status, 'blocked', state.lastError);
+  assert.match(state.lastError, /one reconsideration/);
+  assert.equal(state.currentStep, 0);
+  assert.equal(requests.slice(loopRequestsBefore).length, 2, 'Only one reconsideration; no helper call');
+  assert.equal(await worker.evaluate(() => globalThis.debuggerAttaches), 0, 'No debugger for observation or terminal reviews');
+  const loopHistory = await worker.evaluate(async () => (await chrome.storage.local.get('jev_run_history_v1')).jev_run_history_v1);
+  assert.ok(loopHistory[0].nodes.some(n => n.label === 'Stopped repeated terminal reviews'));
+  assert.ok(loopHistory[0].nodes.filter(n => n.kind === 'request').every(n => n.input?.questions && n.output?.response));
+  await loopPopup.close(); await looping.close();
+  console.log('PASS contradictory terminal loop stops after two calls, without helper or debugger, with complete API bodies');
+
   const source = await context.newPage(); await source.goto(origin+'/search.html');
   const sourceId=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id,origin+'/search.html');
   const navigation=await context.newPage(); await navigation.goto(`chrome-extension://${extension}/popup.html?tabId=${sourceId}`);

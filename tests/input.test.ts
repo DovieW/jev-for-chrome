@@ -61,6 +61,39 @@ describe('TrustedInput', () => {
     await expect(input.click(1, 1)).rejects.toThrow('not attached');
   });
 
+  it('cleans up an attachment that completes after Stop and serializes the next attachment', async () => {
+    const { chromeMock } = installChrome();
+    const input = new TrustedInput();
+    let complete!: () => void;
+    chromeMock.debugger.attach.mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    const attaching = input.attach(7);
+    await vi.waitFor(() => expect(complete).toBeTypeOf('function'));
+    const stopping = input.detach();
+    const next = input.attach(8);
+    complete();
+    expect(await attaching).toBe(false);
+    await stopping;
+    expect(await next).toBe(true);
+    expect(chromeMock.debugger.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 7 });
+    expect(input.attachedTab).toBe(8);
+  });
+
+  it('never sends the rest of an old gesture into a new debugger session', async () => {
+    const { chromeMock, commands } = installChrome();
+    const input = new TrustedInput();
+    await input.attach(7);
+    let release!: () => void;
+    chromeMock.debugger.sendCommand.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({}); }));
+    const click = input.click(1, 2);
+    const rejected = expect(click).rejects.toThrow('original session');
+    await input.detach();
+    await input.attach(8);
+    release();
+    await rejected;
+    expect(commands).toHaveLength(0);
+    expect(chromeMock.debugger.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
   it('moves between tabs by detaching first, and notices when the user cancels', async () => {
     const { chromeMock, fireDetach } = installChrome();
     const input = new TrustedInput();

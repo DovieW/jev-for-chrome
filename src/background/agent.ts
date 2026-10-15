@@ -112,10 +112,11 @@ export class AgentRunner {
   private tabStack: number[] = [];
   private pendingTab: { from: number; to: number; closed: boolean } | null = null;
   private tabNote: string | null = null;
-  /** Trusted input via chrome.debugger; attached per run when the setting is on and permitted. */
+  /** Trusted input is attached only for the duration of an input action. */
   private input = new TrustedInput();
-  /** Avoid repeating a failed attachment on every decision in a continuous run. */
-  private inputAttemptedTab: number | null = null;
+  /** Follow page-created tabs only while executing an action and waiting for its navigation. */
+  private actionTabId: number | null = null;
+  private terminalReviews = 0;
 
   private recorder?: RunRecorder;
 
@@ -138,7 +139,9 @@ export class AgentRunner {
 
   private onTabCreated(tab: chrome.tabs.Tab): void {
     if (this.progress.status !== 'running' || tab.id === undefined) return;
-    if (this.activeTabId === null || tab.openerTabId !== this.activeTabId) return;
+    if (this.activeTabId === null || tab.openerTabId !== this.activeTabId || this.actionTabId !== this.activeTabId) return;
+    const url = tab.pendingUrl || tab.url || '';
+    if (url && !/^https?:\/\//i.test(url) && !isStartingPage(url)) return;
     this.tabStack.push(this.activeTabId);
     this.pendingTab = { from: this.activeTabId, to: tab.id, closed: false };
     this.activeTabId = tab.id;
@@ -160,7 +163,6 @@ export class AgentRunner {
     this.tabNote = pending.closed ? 'the tab closed; back on the previous tab' : 'opened a new tab and switched to it';
     await chrome.tabs.update(pending.to, { active: true }).catch(() => undefined);
     await this.waitForTabToLoad(pending.to);
-    await this.attachInput(pending.to);
     this.sendStatus({ text: this.tabNote });
   }
   private startUrl = '';
@@ -196,7 +198,8 @@ export class AgentRunner {
     this.runToken++;
     this.activeTabId = tabId;
     this.startTabId = tabId;
-    this.inputAttemptedTab = null;
+    this.actionTabId = null;
+    this.terminalReviews = 0;
     this.history = [];
     this.lastFingerprint = null;
     this.lastSummary = null;
@@ -245,7 +248,6 @@ export class AgentRunner {
     } else {
       this.runToken++;
       this.progress.status = 'running';
-      this.inputAttemptedTab = null;
     }
     const token = this.runToken;
 
@@ -412,11 +414,11 @@ export class AgentRunner {
       this.activeTabId = taskTabId;
       this.lastFingerprint = null;
       this.lastSummary = null;
-      this.inputAttemptedTab = null;
     }
     if (token !== this.runToken) return true;
     const operation = matching ? 'SWITCH_TAB' : replaceTab ? 'NAVIGATE' : 'OPEN_TAB';
     navigation.end({ url, tabId: taskTabId, operation, requestedOperation: chosen.choice });
+    this.terminalReviews = 0;
     this.progress.currentStep++;
     this.history.push({ step: this.progress.currentStep, action: `${operation} ${url}`, kind: 'navigate', url, page_changed: true, outcome: `${matching ? 'switched to an open tab' : 'navigated to'} ${url}` });
     this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation, targetLabel: matching ? 'Switched to the chosen open tab' : replaceTab ? 'Starting page requested by decision model' : 'Opened a task tab', targetValue: url, confidence: chosen.confidence, probabilities: chosen.probabilities, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
@@ -483,6 +485,7 @@ export class AgentRunner {
       if (token === this.runToken) this.finish('error', error?.message || String(error));
       return false;
     } finally {
+      if (token === this.runToken) this.actionTabId = null;
       void recorder.flush();
     }
   }
@@ -505,17 +508,15 @@ export class AgentRunner {
         return token === this.runToken && this.progress.status === 'running';
       }
       if (token !== this.runToken) return false;
-      observation = trace.child('observe', 'Read page and prepare input', { tabId });
+      observation = trace.child('observe', 'Read page', { tabId });
       await this.ensureContentScriptReady(tabId);
-      if (token !== this.runToken) return false;
-      if (this.inputAttemptedTab !== tabId) await this.attachInput(tabId);
       if (token !== this.runToken) return false;
       const response = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_OBSERVE' });
       if (!response?.success || !response.snapshot) {
         throw new Error(response?.error || 'Failed to capture page DOM snapshot');
       }
       snapshot = response.snapshot;
-      observation.end({ url: snapshot.url, title: snapshot.title, text: snapshot.text.slice(0, 6000), actions: snapshot.actions.length, omittedActions: snapshot.omitted_actions, input: this.progress.inputNote || 'Trusted input attached' });
+      observation.end({ url: snapshot.url, title: snapshot.title, text: snapshot.text.slice(0, 6000), actions: snapshot.actions.length, omittedActions: snapshot.omitted_actions });
     } catch (err: any) {
       if (observation) observation.fail(err);
       else trace.event('Page startup failed', { error: err?.message || String(err) }, 'error');
@@ -651,21 +652,20 @@ export class AgentRunner {
       this.vetoed = 'DONE';
       this.lastStaleNotice = `ATTENTION: DONE was proposed, but the independent goal check says the task is not achieved yet (probability ${goalDone.toFixed(2)}). Something in the task is still missing; act on it.`;
       this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'DONE (vetoed)', confidence: operationAnswer.confidence, latencyMs, provider, probabilities: operationAnswer.probabilities, goalDone, stuck });
-      this.broadcastUpdate();
-      return true;
+      return this.reviewTerminal(trace);
     }
-    if (operation === 'BLOCKED' && stuck !== undefined && stuck < STUCK_MIN && this.history.length < REPEAT_WINDOW) {
+    if (operation === 'BLOCKED' && stuck !== undefined && stuck < STUCK_MIN) {
       trace.event('BLOCKED rejected by progress check', { stuck, threshold: STUCK_MIN, next: 'Observe again with BLOCKED withheld' }, 'skipped');
       this.vetoed = 'BLOCKED';
       this.lastStaleNotice = `ATTENTION: BLOCKED was proposed, but the independent progress check does not see a dead end (stuck probability ${stuck.toFixed(2)}). Choose a control that moves toward the task.`;
       this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'BLOCKED (vetoed)', confidence: operationAnswer.confidence, latencyMs, provider, probabilities: operationAnswer.probabilities, goalDone, stuck });
-      this.broadcastUpdate();
-      return true;
+      return this.reviewTerminal(trace);
     }
 
     if (operation === 'DONE' || operation === 'BLOCKED') {
       if (operationAnswer.confidence < TERMINAL_CONFIRM_THRESHOLD && this.pendingTerminal !== operation) {
         // A hesitant verdict gets one more look after the page settles; only a repeat ends the run.
+        if (!this.reviewTerminal(trace)) return false;
         this.pendingTerminal = operation;
         this.sendStatus({ text: operation === 'DONE' ? 'Checking whether the task is complete…' : 'Checking for another way forward…', latencyMs });
         await trace.measure('wait', 'Confirm low-confidence verdict', { operation, confidence: operationAnswer.confidence, threshold: TERMINAL_CONFIRM_THRESHOLD }, () => new Promise(r => setTimeout(r, 600)));
@@ -728,11 +728,11 @@ export class AgentRunner {
         this.pendingTab = null;
         this.lastFingerprint = null;
         this.lastSummary = null;
-        this.inputAttemptedTab = null;
         this.lastTargetActionId = null;
         this.targetFailureCount.clear();
         this.consecutiveStale = 0;
         this.invalidAnswerRetried = false;
+        this.terminalReviews = 0;
         this.progress.currentStep++;
         this.history.push({ step: this.progress.currentStep, action: `${operation} ${targetUrl}`, kind: 'navigate', url: targetUrl, page_changed: true, outcome: `${operation === 'SWITCH_TAB' ? 'switched to an open tab' : 'opened a task tab'}: ${targetUrl}` });
         this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation, targetLabel: operation === 'SWITCH_TAB' ? 'Switched to an open tab' : 'Opened a task tab', targetValue: targetUrl, latencyMs: Date.now() - started, provider });
@@ -822,7 +822,8 @@ export class AgentRunner {
     let navigated = false;
     const action = trace.child('action', `${operation} ${targetAction.label}`, { target: targetAction, text: generatedText });
     try {
-      const result = await this.act(tabId, targetAction, generatedText, action);
+      this.actionTabId = tabId;
+      const result = await this.act(tabId, targetAction, generatedText, action, token);
       action.end(result, result.ok ? 'ok' : 'skipped');
       if (token !== this.runToken) return false;
       if (!result.ok) {
@@ -870,6 +871,7 @@ export class AgentRunner {
       text: generatedText,
       page_changed: undefined,
     });
+    this.terminalReviews = 0;
     this.progress.currentStep++;
     this.addLog({
       step: this.progress.currentStep,
@@ -927,11 +929,13 @@ export class AgentRunner {
   }
 
   /** Attaches trusted input when enabled; records why not so the trace shows which path ran. */
-  private async attachInput(tabId: number): Promise<void> {
-    this.inputAttemptedTab = tabId;
-    if (!this.settings.trustedInput) {
+  private async attachInput(tabId: number, token: number): Promise<void> {
+    const enabled = this.settings.trustedInput;
+    const attached = enabled && await this.input.attach(tabId);
+    if (token !== this.runToken) return;
+    if (!enabled) {
       this.progress.inputNote = 'Trusted input is off in settings; using synthetic events.';
-    } else if (await this.input.attach(tabId)) {
+    } else if (attached) {
       delete this.progress.inputNote;
     } else {
       this.progress.inputNote = TrustedInput.available()
@@ -946,12 +950,26 @@ export class AgentRunner {
    * through the DevTools protocol when attached, or with synthetic events otherwise. A
    * trusted dispatch that throws falls back to synthetic on the already prepared target.
    */
-  private async act(tabId: number, action: PageAction, text: string | undefined, trace: TraceSpan): Promise<ActResult> {
+  private async act(tabId: number, action: PageAction, text: string | undefined, trace: TraceSpan, token: number): Promise<ActResult> {
+    // Observation, navigation, scrolling and waiting do not require a debugger session.
+    if (!['click', 'fill', 'key'].includes(action.kind)) return this.dispatchAction(tabId, action, text, trace, token);
+    try {
+      await trace.measure('action', 'Prepare input connection', { tabId }, () => this.attachInput(tabId, token));
+      if (token !== this.runToken) return { ok: false, code: 'failed', message: 'Task stopped before input.' };
+      return await this.dispatchAction(tabId, action, text, trace, token);
+    } finally {
+      // stop() already queued cleanup; a stale action must not detach a newer run.
+      if (token === this.runToken) await trace.measure('action', 'Release input connection', { tabId }, () => this.input.detach());
+    }
+  }
+
+  private async dispatchAction(tabId: number, action: PageAction, text: string | undefined, trace: TraceSpan, token: number): Promise<ActResult> {
     if (this.input.attachedTab !== tabId) {
       const result: ActResult | undefined = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_ACT', action, text });
       return result ?? { ok: false, code: 'failed', message: 'No reply from the page.' };
     }
     const prep: PrepareResult | undefined = await trace.measure('action', 'Validate and prepare target', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PREPARE', action, text }));
+    if (token !== this.runToken) return { ok: false, code: 'failed', message: 'Task stopped before input.' };
     if (!prep) return { ok: false, code: 'failed', message: 'No reply from the page.' };
     if (!prep.ok) return prep;
     if (prep.done) return { ok: true, via: 'page' };
@@ -961,6 +979,7 @@ export class AgentRunner {
         await this.input.click(prep.x, prep.y);
       } else if (action.kind === 'fill') {
         await this.input.click(prep.x, prep.y);
+        if (token !== this.runToken) return { ok: false, code: 'failed', message: 'Task stopped before typing.' };
         await this.input.insertText(text ?? '');
       } else if (action.kind === 'key') {
         await this.input.pressEnter();
@@ -971,6 +990,7 @@ export class AgentRunner {
       dispatch.end();
     } catch (err: any) {
       dispatch.fail(err);
+      if (token !== this.runToken) return { ok: false, code: 'failed', message: 'Task stopped during input.' };
       // The session was lost mid-action (tab navigated away, user cancelled): synthetic events
       // on the target the page already prepared are the closest equivalent.
       const fallback: ActResult | undefined = await trace.measure('action', 'Fall back to synthetic input', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_DISPATCH', action, text }));
@@ -978,6 +998,19 @@ export class AgentRunner {
     }
     await trace.measure('wait', 'Wait for page to settle', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_SETTLE' }).catch(() => undefined));
     return { ok: true, via: 'cdp' };
+  }
+
+  /** Allow one reconsideration; contradictory or alternating verdicts must not spin. */
+  private reviewTerminal(trace: TraceSpan): boolean {
+    this.terminalReviews++;
+    if (this.terminalReviews >= 2) {
+      const message = 'The decision model could not consistently determine whether the task was complete. Stopped after one reconsideration without taking another action.';
+      trace.event('Stopped repeated terminal reviews', { reviews: this.terminalReviews, reason: message }, 'error');
+      this.finish('blocked', message);
+      return false;
+    }
+    this.broadcastUpdate();
+    return true;
   }
 
   private finish(status: 'done' | 'blocked' | 'error', message?: string): void {

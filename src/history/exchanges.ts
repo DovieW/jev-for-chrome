@@ -141,7 +141,7 @@ export function readExchange(node: TraceNode, run: RunTrace): Exchange {
     node,
     parent,
     title,
-    model: body?.model,
+    model: body?.model || object(node.output?.response)?.model,
     state,
     questions,
     answers,

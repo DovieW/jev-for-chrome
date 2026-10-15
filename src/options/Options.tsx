@@ -715,7 +715,7 @@ export const Options: React.FC = () => {
                         <Label htmlFor="trusted-input">Trusted input</Label>
                         <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
                           Send clicks and keystrokes as real user input. Chrome
-                          shows a debugging banner during the run.
+                          may briefly show a debugging banner while input is sent.
                         </p>
                       </div>
                       <Switch

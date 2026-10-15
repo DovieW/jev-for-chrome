@@ -44,6 +44,14 @@ describe("readable model exchanges", () => {
     expect(exchange.usage).toEqual({ input: 4602, output: 0, cached: 0 });
   });
 
+  it("uses the recorded response model when the request was omitted without inventing its contents", () => {
+    const exchange = readExchange(request({ omitted: 'Storage limit', originalBytes: 100000 }, { model: 'test-model', answers: [] }), run);
+    expect(exchange.model).toBe('test-model');
+    expect(exchange.inputMissing).toBe(true);
+    expect(exchange.state).toBeUndefined();
+    expect(exchange.questions).toEqual([]);
+  });
+
   it("shows exact helper messages and separates HTTP success from unusable null output", () => {
     const exchange = readExchange(run.nodes[7], run);
     expect(exchange.messages).toHaveLength(2);

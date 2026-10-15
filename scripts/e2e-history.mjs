@@ -221,6 +221,22 @@ try {
     "PASS actual extension model-call inspector, exact bodies, local selections, filters, import isolation, narrow layout, and invalid exports",
   );
 
+  const omittedRun = JSON.parse(fs.readFileSync('tests/fixtures/diagnostic-run.json', 'utf8'));
+  const omittedRequest = omittedRun.nodes.find(node => node.kind === 'request');
+  omittedRequest.input = { omitted: 'Detail omitted to keep local history within its size limit.', originalBytes: 123456 };
+  omittedRequest.output.response.model = 'recorded-response-model';
+  await page.getByLabel('Open run export', { exact: true }).setInputFiles({
+    name: 'omitted-request.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(omittedRun)),
+  });
+  const omittedCard = page.locator('.exchange-card').first();
+  await omittedCard.getByText('Request details unavailable', { exact: true }).waitFor();
+  assert.match(await omittedCard.innerText(), /removed from saved history.*storage limit.*121 KB/);
+  assert.match(await omittedCard.innerText(), /recorded-response-model/);
+  assert.doesNotMatch(await omittedCard.innerText(), /0 messages sent|Model not recorded/);
+  await omittedCard.screenshot({ path: '.e2e-out/history-omitted-request.png' });
+  assert.deepEqual(await disk(), before);
+  console.log('PASS omitted requests show the retention reason, size, and recorded response model without inventing a message count');
+
   if (process.env.JEV_TRACE_FILE) {
     await page
       .getByLabel("Open run export", { exact: true })

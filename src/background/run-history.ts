@@ -66,18 +66,25 @@ export function boundRun(run: RunTrace): RunTrace {
   for (const node of copy.nodes) node.error = clip(node.error, 2000);
   if (size(copy) <= MAX_RUN_BYTES) return copy;
   copy.truncated = true;
-  // Keep the complete sequence and final outcomes; shed the largest diagnostic payloads first.
+  // Shed duplicate observation/prepared-state payloads before the actual API exchanges.
+  // Retain request/response bodies as long as possible: these are the source of truth.
   const payloads = copy.nodes
     .flatMap((node) =>
       (["input", "output"] as const)
         .filter((key) => node[key] !== undefined)
         .map((key) => ({ node, key, bytes: size(node[key]) })),
     )
-    .sort((a, b) => b.bytes - a.bytes);
+    // Preserve small outcomes/errors as well as wire responses.
+    .sort((a, b) =>
+      Number(a.node.kind === "request" || a.bytes <= 4096) -
+        Number(b.node.kind === "request" || b.bytes <= 4096) || b.bytes - a.bytes,
+    );
   let bytes = size(copy);
   for (const { node, key, bytes: removed } of payloads) {
     if (bytes <= MAX_RUN_BYTES) break;
+    const model = node[key]?.model;
     node[key] = {
+      ...(typeof model === "string" ? { model } : {}),
       omitted: "Detail omitted to keep local history within its size limit.",
       originalBytes: removed,
     };

@@ -449,7 +449,9 @@ function Answer({
           </div>
           {!choices.has(answer.choice) && (
             <p className="inspector-note">
-              This choice has no matching candidate in the saved request.
+              {question
+                ? "This choice has no matching candidate in the saved request."
+                : "The offered choices are unavailable because this question was not retained in the saved request."}
             </p>
           )}
           {all && probabilities.length > 12 && (
@@ -703,7 +705,9 @@ function ExchangeCard({
             <TabsTrigger value="raw">Raw JSON</TabsTrigger>
           </TabsList>
           <p>
-            {exchange.questions.length
+            {exchange.inputMissing
+              ? "Request details unavailable"
+              : exchange.questions.length
               ? `${exchange.questions.length} questions sent`
               : `${exchange.messages.length} messages sent`}
           </p>
@@ -722,9 +726,10 @@ function ExchangeCard({
                 <div className="exchange-warning">
                   <CircleAlert className="size-4" />
                   <p>
-                    The request body is missing or was omitted. The prepared
-                    decision state in Execution trace may differ from what was
-                    sent.
+                    {typeof exchange.node.input?.omitted === "string"
+                      ? `This request body was removed from saved history to fit the storage limit${typeof exchange.node.input.originalBytes === "number" ? ` (${Math.ceil(exchange.node.input.originalBytes / 1024)} KB)` : ""}. Its exact contents cannot be recovered from this export.`
+                      : "No request body was recorded for this call."}
+                    {" "}The prepared decision state in Execution trace may differ from what was sent.
                   </p>
                 </div>
               ) : (
