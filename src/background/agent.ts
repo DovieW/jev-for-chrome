@@ -14,7 +14,7 @@ import {
   RecentAction,
 } from '../shared/types';
 import { TrustedInput } from './input';
-import { addBrowserActions, BrowserTab } from '../shared/browser-tabs';
+import { addBrowserActions, buildStartupRequest, BrowserTab } from '../shared/browser-tabs';
 import { RunHistoryStore, RunRecorder } from './run-history';
 import type { TraceSpan } from '../shared/trace';
 
@@ -322,7 +322,14 @@ export class AgentRunner {
 
   private lastPingError = '';
 
-  /** Returns true when this step was a bootstrap navigation, false on a regular page. */
+  private async readOpenTabs(trace: TraceSpan): Promise<BrowserTab[]> {
+    return trace.measure('observe', 'Read open tabs', undefined, async () =>
+      (await chrome.tabs.query({}) || [])
+        .filter(tab => tab.id !== undefined && !tab.incognito && /^https?:/.test(tab.pendingUrl || tab.url || ''))
+        .map(tab => ({ id: tab.id!, windowId: tab.windowId, title: (tab.title || '').slice(0, 160), url: tab.pendingUrl || tab.url || '' })));
+  }
+
+  /** Returns true when startup handled this cycle (including blocked/invalid decisions). */
   private async bootstrap(tabId: number, token: number, trace: TraceSpan): Promise<boolean> {
     const tab = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
@@ -330,30 +337,68 @@ export class AgentRunner {
     const replaceTab = isStartingPage(originalUrl);
     if (!replaceTab && !INTERNAL_PREFIXES.some((prefix) => originalUrl.startsWith(prefix))) return false;
     const started = Date.now();
-    const url = await trace.measure('helper', 'Choose starting URL', { goal: this.progress.goal }, span => generateStartingUrl(this.settings, this.progress.goal, span));
+    if (this.decisionCount >= this.progress.maxSteps * 2) {
+      this.finish('blocked', 'Reached the model-call budget for this run.');
+      return true;
+    }
+    const tabs = await this.readOpenTabs(trace);
     if (token !== this.runToken) return true;
+    const { request, actionSpace, tabTargets } = buildStartupRequest(activeJevModel(this.settings), this.progress.goal, originalUrl, tabs, tabId, this.lastStaleNotice || undefined);
+    this.lastStaleNotice = null;
+    const decision = trace.child('decision', 'Choose starting tab or page', request);
+    let response;
+    try {
+      this.decisionCount++;
+      response = await callJevProvider(this.settings, request, decision);
+      decision.end(response);
+    } catch (error) {
+      decision.fail(error);
+      throw error;
+    }
+    if (token !== this.runToken) return true;
+    let chosen;
+    let matching: BrowserTab | undefined;
+    try {
+      chosen = validateChoiceAnswer(response.answers?.operation, actionSpace.operations);
+      if (chosen.choice === 'SWITCH_TAB') {
+        const target = validateChoiceAnswer(response.answers?.switch_tab_target, tabTargets);
+        matching = tabTargets[target.choice];
+      }
+    } catch (error: any) {
+      this.rejectAnswer(`Invalid starting-page decision: ${error?.message || String(error)}`, trace);
+      return true;
+    }
+    if (chosen.choice === 'BLOCKED') {
+      this.finish('blocked', 'The decision model could not choose a starting page for this task.');
+      return true;
+    }
     const current = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
     if ((current.pendingUrl || current.url || '') !== originalUrl) {
-      throw new Error('The tab changed while choosing a starting URL. Start a new run on the current page.');
+      throw new Error('The tab changed while choosing a starting action. Start a new run on the current page.');
     }
-    let taskTabId = tabId;
-    const open = await chrome.tabs.query({});
+    // The text helper is invoked only after the decision model explicitly selects OPEN_TAB.
+    let url: string;
+    if (chosen.choice === 'OPEN_TAB') {
+      url = await trace.measure('helper', 'Choose starting URL', { goal: this.progress.goal, requestedBy: 'OPEN_TAB' }, span => generateStartingUrl(this.settings, this.progress.goal, span));
+    } else if (matching) {
+      url = matching.url;
+    } else {
+      throw new Error('The starting action has no valid destination.');
+    }
     if (token !== this.runToken) return true;
-    const matching = !/\b(?:new|another|separate)\s+tab\b/i.test(this.progress.goal) && (open || [])
-      .filter(candidate => candidate.id !== tabId && candidate.id !== undefined && !candidate.incognito && (candidate.pendingUrl || candidate.url) === url)
-      .sort((a, b) => Number(b.windowId === current.windowId) - Number(a.windowId === current.windowId))[0];
+    let taskTabId = tabId;
     const sourceNow = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
     if ((sourceNow.pendingUrl || sourceNow.url || '') !== originalUrl) throw new Error('The source tab changed while choosing a starting page. Start the task again.');
     const navigation = trace.child('action', matching ? 'Reuse starting tab' : replaceTab ? 'Navigate blank tab' : 'Open starting tab', { url, sourceTabId: tabId });
     if (matching) {
-      const live = await chrome.tabs.get(matching.id!);
+      const live = await chrome.tabs.get(matching.id);
       if (token !== this.runToken) return true;
-      if ((live.pendingUrl || live.url) !== url) throw new Error('The matching open tab changed. Start the task again.');
-      await chrome.tabs.update(matching.id!, { active: true });
-      if (chrome.windows?.update) await chrome.windows.update(matching.windowId, { focused: true });
-      taskTabId = matching.id!;
+      if (live.incognito || (live.pendingUrl || live.url) !== url) throw new Error('The selected open tab changed. Start the task again.');
+      await chrome.tabs.update(matching.id, { active: true });
+      if (chrome.windows?.update) await chrome.windows.update(live.windowId, { focused: true });
+      taskTabId = matching.id;
       this.activeTabId = taskTabId;
     } else if (replaceTab) {
       await chrome.tabs.update(tabId, { url });
@@ -370,10 +415,11 @@ export class AgentRunner {
       this.inputAttemptedTab = null;
     }
     if (token !== this.runToken) return true;
-    navigation.end({ url, tabId: taskTabId, operation: matching ? 'SWITCH_TAB' : replaceTab ? 'NAVIGATE' : 'OPEN_TAB' });
+    const operation = matching ? 'SWITCH_TAB' : replaceTab ? 'NAVIGATE' : 'OPEN_TAB';
+    navigation.end({ url, tabId: taskTabId, operation, requestedOperation: chosen.choice });
     this.progress.currentStep++;
-    this.history.push({ step: this.progress.currentStep, action: `NAVIGATE ${url}`, kind: 'navigate', url, page_changed: true, outcome: `navigated to ${url}` });
-    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: matching ? 'SWITCH_TAB' : 'NAVIGATE', targetLabel: matching ? 'Reused an open task tab' : replaceTab ? 'Starting URL chosen by text helper' : 'Opened a task tab', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
+    this.history.push({ step: this.progress.currentStep, action: `${operation} ${url}`, kind: 'navigate', url, page_changed: true, outcome: `${matching ? 'switched to an open tab' : 'navigated to'} ${url}` });
+    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation, targetLabel: matching ? 'Switched to the chosen open tab' : replaceTab ? 'Starting page requested by decision model' : 'Opened a task tab', targetValue: url, confidence: chosen.confidence, probabilities: chosen.probabilities, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
     this.broadcastUpdate();
     await trace.measure('wait', 'Wait for starting page', { tabId: taskTabId }, () => this.waitForTabToLoad(taskTabId));
     if (token !== this.runToken) return true;
@@ -456,7 +502,7 @@ export class AgentRunner {
     let snapshot: PageSnapshot;
     try {
       if (await this.bootstrap(tabId, token, trace)) {
-        return token === this.runToken;
+        return token === this.runToken && this.progress.status === 'running';
       }
       if (token !== this.runToken) return false;
       observation = trace.child('observe', 'Read page and prepare input', { tabId });
@@ -560,14 +606,7 @@ export class AgentRunner {
     );
     let tabs: BrowserTab[];
     try {
-      const open = await trace.measure('observe', 'Read open tabs', undefined, async () => {
-        const open = await chrome.tabs.query({});
-        // Only the same eligible metadata that can reach the model belongs in diagnostics.
-        return (open || []).filter(tab => !tab.incognito && /^https?:/.test(tab.pendingUrl || tab.url || ''))
-          .map(tab => ({ id: tab.id, windowId: tab.windowId, title: (tab.title || '').slice(0, 160), url: tab.pendingUrl || tab.url || '' }));
-      });
-      tabs = (open || []).filter(tab => tab.id !== undefined && /^https?:/.test(tab.url || ''))
-        .map(tab => ({ id: tab.id!, windowId: tab.windowId, title: tab.title, url: tab.url }));
+      tabs = await this.readOpenTabs(trace);
     } catch (err: any) {
       this.finish('error', `Could not list open tabs: ${err?.message || String(err)}`);
       return false;

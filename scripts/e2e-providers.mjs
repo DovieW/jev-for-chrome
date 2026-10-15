@@ -45,6 +45,7 @@ const server = http.createServer(async (req, res) => {
       const joke = state.task === 'Ask for a joke.';
       const filled = state.elements.some((e) => e.value === (joke ? 'Tell me a joke.' : 'blue widgets'));
       let operation = state.task === 'Connection test' ? 'CLICK' : filled ? 'DONE' : 'TYPE_TEXT';
+      if (state.page.title === 'Unobservable browser page') operation = state.task === 'Find the example conversation in WhatsApp' ? 'SWITCH_TAB' : 'OPEN_TAB';
       const offeredOperations = body.questions.find(q => q.name === 'operation');
       if (joke && !filled && offeredOperations && !offeredOperations.choices.some(c => c.value === 'TYPE_TEXT')) operation = 'CLICK';
       if (state.task.startsWith('New tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('OPEN_TAB'))) operation='OPEN_TAB';
@@ -52,7 +53,7 @@ const server = http.createServer(async (req, res) => {
       const selected = q => q.name === 'operation' ? operation : joke && q.name === 'click_target'
         ? q.choices.find(c => c.description.includes('Open chat')).value : joke && q.name === 'type_text_target'
         ? q.choices.find(c => c.description.includes('Chat message'))?.value || q.choices[0].value : q.name === 'switch_tab_target'
-        ? q.choices.find(c=>JSON.parse(c.description).title==='Target search')?.value || q.choices[0].value : q.choices[0].value;
+        ? q.choices.find(c=>JSON.parse(c.description).title===(state.task === 'Find the example conversation in WhatsApp' ? 'WhatsApp' : 'Target search'))?.value || q.choices[0].value : q.choices[0].value;
       result = {
         model: 'gpt-6-luna',
         answers: body.questions.map((q) => q.type === 'predicate'
@@ -347,6 +348,35 @@ try {
   await switcher.locator('.popup-shell').screenshot({path:'.e2e-out/open-tab-switch.png'});
   await source.close(); await target.close(); await decoy.close(); await switcher.close();
   console.log('PASS regular-page OPEN_TAB and existing SWITCH_TAB, stable source popup, and no duplicate target tab');
+
+  // Startup routing must reach the decision model before any URL helper call.
+  const whatsapp = await context.newPage();
+  await whatsapp.goto(origin + '/chat.html');
+  await whatsapp.evaluate(() => { document.title = 'WhatsApp'; });
+  const whatsappId = await worker.evaluate(async () => (await chrome.tabs.query({})).find(t => t.title === 'WhatsApp').id);
+  const reuse = await newTabPopup();
+  const routingStart = requests.length;
+  await reuse.popup.locator('textarea').fill('Find the example conversation in WhatsApp');
+  await reuse.popup.getByRole('button', { name: 'Step', exact: true }).click();
+  state = await poll(progress, p => p.status === 'paused' || p.status === 'error');
+  assert.equal(state.status, 'paused', state.lastError);
+  assert.equal(state.currentStep, 1);
+  assert.equal(state.logs[0].operation, 'SWITCH_TAB');
+  assert.equal((await worker.evaluate(id => chrome.tabs.get(id), whatsappId)).active, true);
+  assert.match(reuse.page.url(), /^chrome:\/\/(?:newtab|new-tab-page)\/$/, 'Switching preserves the source tab');
+  const routing = requests.slice(routingStart);
+  assert.ok(routing.length > 0);
+  assert.ok(routing.every(r => r.path === '/decisions'), 'No text helper is called for an existing tab');
+  const routingState = JSON.parse(routing[0].body.input);
+  assert.equal(routingState.page.text, '');
+  assert.deepEqual(routingState.elements, []);
+  assert.ok(routingState.browser.open_tabs.some(t => t.id === whatsappId));
+  const routedTrace = (await options.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_RUN_HISTORY' }))).runs[0];
+  assert.ok(routedTrace.nodes.some(n => n.label === 'Choose starting tab or page'));
+  assert.ok(!routedTrace.nodes.some(n => n.kind === 'helper'));
+  await options.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_AGENT' }));
+  await whatsapp.close(); await reuse.page.close(); await reuse.popup.close();
+  console.log('PASS startup decision selects an existing WhatsApp tab without invoking the text helper');
 
   // Reproduce the exported run's null helper reply through the actual provider/parser path.
   const chat = await context.newPage();

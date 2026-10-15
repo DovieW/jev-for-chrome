@@ -49,6 +49,9 @@ const answer = (choice: string, extra: Record<string, any> = {}) => ({
     ...extra,
   },
 });
+const startupAnswer = (choice: string, extra: Record<string, any> = {}) => answer(choice, {
+  operation: { choice, confidence: 1, probabilities: { [choice]: 1 } }, ...extra,
+});
 const clickTarget = (index: string) => ({
   click_target: { choice: index, confidence: 0.8, probabilities: { [index]: 1 } },
 });
@@ -270,12 +273,13 @@ describe('AgentRunner', () => {
     chromeMock.tabs.get.mockResolvedValue({ id: 7, url: 'chrome://extensions', status: 'complete' } as any);
     const r = runner();
     startingUrl.mockRejectedValueOnce(new Error('No API key for starting URL'));
+    jev.mockResolvedValueOnce(startupAnswer('OPEN_TAB'));
     await r.start('Anything', 7);
     expect(r.getProgress().status).toBe('error');
     expect(r.getProgress().lastError).toMatch(/No API key/);
     expect(chromeMock.tabs.create).not.toHaveBeenCalled();
     expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
   });
 });
 
@@ -789,19 +793,61 @@ describe('new-tab startup', () => {
     browser.tabs.get.mockImplementation(async (id = 7) => ({ id, url: id === 8 ? 'https://example.com/' : url, status: 'complete', windowId: 3 }));
     browser.tabs.update.mockImplementation(async (_id: number, changes: any) => { url = changes.url; return {} as any; });
     startingUrl.mockResolvedValue('https://example.com/');
+    jev.mockResolvedValue(startupAnswer('OPEN_TAB'));
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('Run navigates first, records the extra step, and continues with decisions', async () => {
-    jev.mockResolvedValue(answer('DONE', { goal_done: { probability: 1 } }));
+  it('Run decides to open a page before requesting a URL and continues with decisions', async () => {
+    jev.mockResolvedValueOnce(startupAnswer('OPEN_TAB')).mockResolvedValue(answer('DONE', { goal_done: { probability: 1 } }));
     const r = runner();
     await r.start('Find flights', 7);
     expect(startingUrl).toHaveBeenCalledOnce();
+    expect(jev.mock.invocationCallOrder[0]).toBeLessThan(startingUrl.mock.invocationCallOrder[0]);
+    expect(jev.mock.calls[0][1].state.elements).toEqual([]);
+    expect(jev.mock.calls[0][1].state.browser).toEqual({ active_tab_id: 7, open_tabs: [] });
     expect(browser.tabs.update).toHaveBeenCalledWith(7, { url: 'https://example.com/' });
     expect(r.getProgress().status).toBe('done');
     expect(r.getProgress().currentStep).toBe(1);
     expect(r.getProgress().logs.at(-1)).toMatchObject({ operation: 'NAVIGATE', targetValue: 'https://example.com/' });
-    expect(jev.mock.calls[0][1].state.recent_actions[0]).toMatchObject({ kind: 'navigate', page_changed: true });
+    expect(jev.mock.calls[1][1].state.recent_actions[0]).toMatchObject({ kind: 'navigate', page_changed: true });
+  });
+
+  it('does not fall back to the helper when the decision provider fails', async () => {
+    jev.mockRejectedValueOnce(new Error('Decision API unavailable'));
+    const r = runner();
+    await r.start('Find WhatsApp', 7);
+    expect(r.getProgress().status).toBe('error');
+    expect(r.getProgress().lastError).toContain('Decision API unavailable');
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['BLOCKED', 'CLICK', 'DONE'])('never invokes the helper for startup choice %s', async choice => {
+    jev.mockResolvedValue(startupAnswer(choice));
+    const r = runner();
+    await r.start('Find WhatsApp', 7);
+    expect(r.getProgress().status).toBe(choice === 'BLOCKED' ? 'blocked' : 'error');
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+    expect(jev.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it.each(['stop', 'manual navigation'] as const)('does not call the helper after %s while the decision is pending', async action => {
+    let complete!: (value: ReturnType<typeof answer>) => void;
+    jev.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const r = runner();
+    const run = r.start('Find WhatsApp', 7);
+    await vi.waitFor(() => expect(jev).toHaveBeenCalledOnce());
+    expect(startingUrl).not.toHaveBeenCalled();
+    if (action === 'stop') r.stop();
+    else url = 'https://another.example/';
+    complete(startupAnswer('OPEN_TAB'));
+    await run;
+    expect(startingUrl).not.toHaveBeenCalled();
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(r.getProgress().status).toBe(action === 'stop' ? 'idle' : 'error');
   });
 
   it.each(['chrome://newtab/', 'chrome://new-tab-page/', 'about:blank'])('Step bootstraps %s, then resumes normally', async (startingPage) => {
@@ -810,7 +856,7 @@ describe('new-tab startup', () => {
     await r.step('Find flights', 7);
     expect(r.getProgress().status).toBe('paused');
     expect(r.getProgress().currentStep).toBe(1);
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
     jev.mockResolvedValue(answer('DONE'));
     await r.step('Find flights', 7);
     expect(r.getProgress().status).toBe('done');
@@ -837,7 +883,7 @@ describe('new-tab startup', () => {
     expect(browser.tabs.sendMessage.mock.calls.every(([id]) => id === 8)).toBe(true);
     expect(browser.scripting.executeScript).not.toHaveBeenCalled();
     expect(url).toBe(internal);
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
     // A detached popup still targets the source id; it must resume in the task tab.
     jev.mockResolvedValue(answer('DONE'));
     await r.step('Find flights', 7);
@@ -849,7 +895,7 @@ describe('new-tab startup', () => {
 
   it('Run continues in the newly created task tab', async () => {
     url = 'chrome://extensions/';
-    jev.mockResolvedValue(answer('DONE'));
+    jev.mockResolvedValueOnce(startupAnswer('OPEN_TAB')).mockResolvedValue(answer('DONE'));
     const r = runner();
     await r.start('Find flights', 7);
     expect(r.getProgress().status).toBe('done');
@@ -866,7 +912,7 @@ describe('new-tab startup', () => {
     expect(r.getProgress().status).toBe('error');
     expect(r.getProgress().lastError).toContain('Could not create tab');
     expect(browser.tabs.update).not.toHaveBeenCalled();
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
   });
 
   it('stops before opening a task tab when Stop is pressed during URL selection', async () => {
@@ -890,17 +936,17 @@ describe('new-tab startup', () => {
     expect(r.getProgress().lastError).toContain(message);
     expect(r.getProgress().status).toBe('error');
     expect(browser.tabs.update).not.toHaveBeenCalled();
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
   });
 
-  it('reports a navigation failure without attaching input or making a decision', async () => {
+  it('reports a navigation failure without attaching input after the startup decision', async () => {
     browser.tabs.update.mockRejectedValueOnce(new Error('Tab closed'));
     const r = runner();
     await r.start('Find flights', 7);
     expect(r.getProgress().status).toBe('error');
     expect(r.getProgress().lastError).toContain('Tab closed');
     expect(r.getProgress().inputNote).toBeUndefined();
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
   });
 
   it.each(['stop', 'manual navigation'] as const)('does not navigate after %s while the helper is pending', async (action) => {
@@ -914,7 +960,7 @@ describe('new-tab startup', () => {
     complete('https://example.com/');
     await run;
     expect(browser.tabs.update).not.toHaveBeenCalled();
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
     expect(r.getProgress().status).toBe(action === 'stop' ? 'idle' : 'error');
   });
 
@@ -951,7 +997,7 @@ describe('new-tab startup', () => {
     await r.start('Find flights', 7);
     expect(r.getProgress().status).toBe('blocked');
     expect(r.getProgress().currentStep).toBe(1);
-    expect(jev).not.toHaveBeenCalled();
+    expect(jev).toHaveBeenCalledOnce();
   });
 });
 
@@ -1017,7 +1063,7 @@ describe('Browser tab operations', () => {
 
 describe('Existing tab bootstrap', () => {
   afterEach(() => vi.unstubAllGlobals());
-  it.each([false, true])('reuses an exact destination unless explicitly asked for a new tab (new=%s)', async (forceNew) => {
+  it.each([false, true])('follows the startup decision to reuse a tab or request a new destination (new=%s)', async (forceNew) => {
     jev.mockReset(); startingUrl.mockReset(); startingUrl.mockResolvedValue('https://www.youtube.com/');
     const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
     const browser = installChrome(page);
@@ -1025,10 +1071,14 @@ describe('Existing tab bootstrap', () => {
     browser.tabs.get.mockImplementation(async (id = 7) => ({ id, windowId: 1, status: 'complete', url: id === 7 ? sourceUrl : 'https://www.youtube.com/' }));
     browser.tabs.update.mockImplementation(async (_id: number, changes: any) => { if (changes.url) sourceUrl = changes.url; return {} as any; });
     browser.tabs.query.mockResolvedValue([{ id: 9, windowId: 1, title: 'YouTube', url: 'https://www.youtube.com/' }]);
+    jev.mockResolvedValueOnce(forceNew ? startupAnswer('OPEN_TAB') : startupAnswer('SWITCH_TAB', { switch_tab_target: { choice: '9', confidence: 1, probabilities: { '9': 1 } } }));
     const r = runner(); await r.step(forceNew ? 'Open a new tab for YouTube' : 'Find YouTube OLED tests', 7);
     expect(r.getProgress().status).toBe('paused');
     if (forceNew) expect(browser.tabs.update).toHaveBeenCalledWith(7, { url: 'https://www.youtube.com/' });
-    else expect(browser.tabs.update).toHaveBeenCalledWith(9, { active: true });
+    else {
+      expect(browser.tabs.update).toHaveBeenCalledWith(9, { active: true });
+      expect(startingUrl).not.toHaveBeenCalled();
+    }
     expect(browser.tabs.create).not.toHaveBeenCalled();
   });
 });
