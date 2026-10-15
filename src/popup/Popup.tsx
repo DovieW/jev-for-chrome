@@ -326,7 +326,7 @@ export const Popup: React.FC = () => {
           <Label htmlFor="goal" className="text-sm font-medium">
             What would you like to do?
           </Label>
-          <span className="text-[10px] text-muted-foreground">Current tab</span>
+          <span className="text-[10px] text-muted-foreground">Browser tabs</span>
         </div>
         <Textarea
           id="goal"

@@ -41,15 +41,19 @@ const server = http.createServer(async (req, res) => {
     } else {
       const state = JSON.parse(body.input);
       const filled = state.elements.some((e) => e.value === 'blue widgets');
-      const operation = state.task === 'Connection test' ? 'CLICK' : filled ? 'DONE' : 'TYPE_TEXT';
+      let operation = state.task === 'Connection test' ? 'CLICK' : filled ? 'DONE' : 'TYPE_TEXT';
+      if (state.task.startsWith('New tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('OPEN_TAB'))) operation='OPEN_TAB';
+      if (state.task.startsWith('Open tab regression') && !state.recent_actions.some(a=>a.action?.startsWith('SWITCH_TAB'))) operation='SWITCH_TAB';
+      const selected = q => q.name === 'operation' ? operation : q.name === 'switch_tab_target'
+        ? q.choices.find(c=>JSON.parse(c.description).title==='Target search')?.value || q.choices[0].value : q.choices[0].value;
       result = {
         model: 'gpt-6-luna',
         answers: body.questions.map((q) => q.type === 'predicate'
           ? { name: q.name, type: 'predicate', probability: q.name === 'goal_done' && filled ? 1 : 0 }
           : {
             name: q.name, type: 'choice', confidence: 1,
-            choice: q.name === 'operation' ? operation : q.choices[0].value,
-            probabilities: q.choices.map((c) => ({ value: c.value, probability: c.value === (q.name === 'operation' ? operation : q.choices[0].value) ? 1 : 0 })),
+            choice: selected(q),
+            probabilities: q.choices.map((c) => ({ value: c.value, probability: c.value === selected(q) ? 1 : 0 })),
           }),
       };
     }
@@ -288,6 +292,54 @@ try {
   }
   assert.ok(requests.filter((r) => r.path === '/decisions').every(({ body }) => body.model === 'gpt-6-luna' && body.questions.every((q) => q.type !== 'choice' || q.choices.length >= 2)));
   console.log('PASS Luna request parameters, priority tier, and decision schema on actual worker requests');
+
+  // Regular-page navigation must be an offered decision, rather than a failed click head.
+  await worker.evaluate(async () => {
+    const {jev_settings:s}=await chrome.storage.local.get('jev_settings');
+    s.openai.apiKey='dummy-openai'; s.textHelper.apiKey='dummy-openai';
+    await chrome.storage.local.set({jev_settings:s});
+  });
+  const source = await context.newPage(); await source.goto(origin+'/search.html');
+  const sourceId=await worker.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url).id,origin+'/search.html');
+  const navigation=await context.newPage(); await navigation.goto(`chrome-extension://${extension}/popup.html?tabId=${sourceId}`);
+  await navigation.locator('textarea').fill('New tab regression: enter blue widgets into Search');
+  await navigation.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='paused'||p.status==='error');
+  assert.equal(state.status,'paused',state.lastError);
+  assert.equal(state.logs[0].operation,'OPEN_TAB');
+  const newTab=await poll(()=>Promise.resolve(context.pages().find(p=>p!==source&&p.url()===origin+'/search.html')),Boolean);
+  assert.equal(source.url(),origin+'/search.html');
+  await navigation.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='paused'&&p.currentStep===2||p.status==='error');
+  assert.equal(state.status,'paused',state.lastError);
+  assert.equal(await newTab.inputValue('input[name=q]'),'blue widgets');
+  await navigation.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='done'||p.status==='error');
+  assert.equal(state.status,'done',state.lastError);
+  await newTab.close(); await navigation.close();
+
+  const decoy=await context.newPage(); await decoy.goto(origin+'/search.html'); await decoy.evaluate(()=>document.title='Other search');
+  const target=await context.newPage(); await target.goto(origin+'/search.html'); await target.evaluate(()=>document.title='Target search');
+  const targetId=await worker.evaluate(async()=> (await chrome.tabs.query({})).find(t=>t.title==='Target search').id);
+  const switcher=await context.newPage(); await switcher.goto(`chrome-extension://${extension}/popup.html?tabId=${sourceId}`);
+  await switcher.locator('textarea').fill('Open tab regression: enter blue widgets in the existing Target search tab');
+  const tabCount=(await worker.evaluate(()=>chrome.tabs.query({}))).length;
+  await switcher.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='paused'||p.status==='error');
+  assert.equal(state.status,'paused',state.lastError);
+  assert.equal(state.logs[0].operation,'SWITCH_TAB');
+  assert.equal((await worker.evaluate(id=>chrome.tabs.get(id),targetId)).active,true);
+  assert.equal((await worker.evaluate(()=>chrome.tabs.query({}))).length,tabCount);
+  await switcher.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='paused'&&p.currentStep===2||p.status==='error');
+  assert.equal(state.status,'paused',state.lastError);
+  assert.equal(await target.inputValue('input[name=q]'),'blue widgets');
+  await switcher.getByRole('button',{name:'Step',exact:true}).click();
+  state=await poll(progress,p=>p.status==='done'||p.status==='error');
+  assert.equal(state.status,'done',state.lastError);
+  await switcher.locator('.popup-shell').screenshot({path:'.e2e-out/open-tab-switch.png'});
+  await source.close(); await target.close(); await decoy.close(); await switcher.close();
+  console.log('PASS regular-page OPEN_TAB and existing SWITCH_TAB, stable source popup, and no duplicate target tab');
 
   // A dense inbox-like page must recover without dropping or renumbering controls.
   await worker.evaluate(async (endpoint) => {

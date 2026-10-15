@@ -75,3 +75,52 @@ describe('OpenAI Decisions adapter', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+describe('Operation-dependent OpenAI targets', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+  const multi = (): JevRequest => ({ ...request, questions: {
+    ...request.questions,
+    operation: { type: 'choice', instructions: 'Choose operation', criteria: { CLICK: 'Click', OPEN_TAB: 'Open a tab' } },
+    click_target: { type: 'choice', instructions: 'Click target', criteria: { '1': 'Unrelated link', '2': 'Unrelated button' } },
+  } });
+  const first = (op: string) => ({ ...response(), answers: [
+    { ...choice(), choice: op, confidence: 1, probabilities: [{ value: 'CLICK', probability: op === 'CLICK' ? 1 : 0 }, { value: 'OPEN_TAB', probability: op === 'OPEN_TAB' ? 1 : 0 }] },
+    ...response().answers.slice(1),
+  ] });
+  it('does not ask for irrelevant click targets when opening a tab', async () => {
+    mockResponse(first('OPEN_TAB'));
+    const result = await callOpenAI(config, multi());
+    expect(result.answers.operation.choice).toBe('OPEN_TAB');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(body.questions.map((q: any) => q.name)).toEqual(['operation', 'goal_done', 'stuck']);
+  });
+  it('asks only the chosen target in a second request and combines usage', async () => {
+    mockResponse(first('CLICK'));
+    mockResponse({ usage: { input_tokens: 60, output_tokens: 0 }, answers: [{ name: 'click_target', type: 'choice', choice: '2', confidence: 1, probabilities: [{ value: '1', probability: 0 }, { value: '2', probability: 1 }] }] });
+    const result = await callOpenAI(config, multi());
+    expect(result.answers.click_target.choice).toBe('2');
+    expect(result.usage?.input_tokens).toBe(160);
+    const second = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+    expect(second.questions.map((q: any) => q.name)).toEqual(['click_target']);
+  });
+  it('still refuses execution when the selected target is refused', async () => {
+    mockResponse(first('CLICK'));
+    mockResponse({ answers: [{ name: 'click_target', type: 'refusal' }] });
+    await expect(callOpenAI(config, multi())).rejects.toThrow(/refused question "click_target"/);
+  });
+});
+
+describe('Large open-tab target sets', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+  it('selects from all offered tabs without truncating the last tab', async () => {
+    const criteria = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [String(i), `Tab ${i}`]));
+    mockResponse({ answers: [{ name: 'candidate_group', type: 'choice', choice: '1', confidence: 1, probabilities: [{ value: '0', probability: 0 }, { value: '1', probability: 1 }] }] });
+    mockResponse({ answers: [{ name: 'switch_tab_target', type: 'choice', choice: '299', confidence: 1, probabilities: Array.from({ length: 45 }, (_, i) => ({ value: String(i + 255), probability: i === 44 ? 1 : 0 })) }] });
+    const result = await callOpenAI(config, { ...request, questions: { switch_tab_target: { type: 'choice', instructions: 'Find the matching tab', criteria } } });
+    expect(result.answers.switch_tab_target.choice).toBe('299');
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});

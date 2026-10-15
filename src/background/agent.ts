@@ -14,6 +14,7 @@ import {
   RecentAction,
 } from '../shared/types';
 import { TrustedInput } from './input';
+import { addBrowserActions, BrowserTab } from '../shared/browser-tabs';
 
 /** Semantic fingerprint of an observation: URL, scroll, visible text and the element table. */
 export function computePageFingerprint(snapshot: PageSnapshot): string {
@@ -317,7 +318,23 @@ export class AgentRunner {
       throw new Error('The tab changed while choosing a starting URL. Start a new run on the current page.');
     }
     let taskTabId = tabId;
-    if (replaceTab) {
+    const open = await chrome.tabs.query({});
+    if (token !== this.runToken) return true;
+    const matching = !/\b(?:new|another|separate)\s+tab\b/i.test(this.progress.goal) && (open || [])
+      .filter(candidate => candidate.id !== tabId && candidate.id !== undefined && !candidate.incognito && (candidate.pendingUrl || candidate.url) === url)
+      .sort((a, b) => Number(b.windowId === current.windowId) - Number(a.windowId === current.windowId))[0];
+    const sourceNow = await chrome.tabs.get(tabId);
+    if (token !== this.runToken) return true;
+    if ((sourceNow.pendingUrl || sourceNow.url || '') !== originalUrl) throw new Error('The source tab changed while choosing a starting page. Start the task again.');
+    if (matching) {
+      const live = await chrome.tabs.get(matching.id!);
+      if (token !== this.runToken) return true;
+      if ((live.pendingUrl || live.url) !== url) throw new Error('The matching open tab changed. Start the task again.');
+      await chrome.tabs.update(matching.id!, { active: true });
+      if (chrome.windows?.update) await chrome.windows.update(matching.windowId, { focused: true });
+      taskTabId = matching.id!;
+      this.activeTabId = taskTabId;
+    } else if (replaceTab) {
       await chrome.tabs.update(tabId, { url });
     } else {
       // Chrome's own UI cannot be observed. Keep it open and start on a normal web tab.
@@ -334,7 +351,7 @@ export class AgentRunner {
     if (token !== this.runToken) return true;
     this.progress.currentStep++;
     this.history.push({ step: this.progress.currentStep, action: `NAVIGATE ${url}`, kind: 'navigate', url, page_changed: true, outcome: `navigated to ${url}` });
-    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'NAVIGATE', targetLabel: replaceTab ? 'Starting URL chosen by text helper' : 'Opened a task tab', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
+    this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: matching ? 'SWITCH_TAB' : 'NAVIGATE', targetLabel: matching ? 'Reused an open task tab' : replaceTab ? 'Starting URL chosen by text helper' : 'Opened a task tab', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
     this.broadcastUpdate();
     await this.waitForTabToLoad(taskTabId);
     if (token !== this.runToken) return true;
@@ -491,6 +508,17 @@ export class AgentRunner {
       { warning, suppressedTargetIds },
       { start_url: this.startUrl, steps_taken: this.history.length, visited_urls: this.visitedUrls.slice(-6) }
     );
+    let tabs: BrowserTab[];
+    try {
+      const open = await chrome.tabs.query({});
+      tabs = (open || []).filter(tab => tab.id !== undefined && !tab.incognito && /^https?:/.test(tab.pendingUrl || tab.url || ''))
+        .map(tab => ({ id: tab.id!, windowId: tab.windowId, title: (tab.title || '').slice(0, 160), url: tab.pendingUrl || tab.url || '' }));
+    } catch (err: any) {
+      this.finish('error', `Could not list open tabs: ${err?.message || String(err)}`);
+      return false;
+    }
+    if (token !== this.runToken) return false;
+    const tabTargets = addBrowserActions(request, actionSpace, tabs, tabId);
     if (this.vetoed) {
       // The previous verdict was contradicted by its cross-check; withhold it this time.
       delete actionSpace.operations[this.vetoed];
@@ -561,6 +589,61 @@ export class AgentRunner {
     }
 
     this.pendingTerminal = null;
+
+    if (operation === 'OPEN_TAB' || operation === 'SWITCH_TAB') {
+      try {
+        let destination: chrome.tabs.Tab | undefined;
+        let targetUrl: string;
+        if (operation === 'SWITCH_TAB') {
+          const choice = validateChoiceAnswer(jevResponse.answers?.switch_tab_target, tabTargets);
+          const offered = tabTargets[choice.choice];
+          targetUrl = offered.url;
+          const live = await chrome.tabs.get(offered.id);
+          if (token !== this.runToken) return false;
+          if (live.incognito || (live.pendingUrl || live.url) !== offered.url) {
+            this.lastStaleNotice = 'The selected tab changed. Reconsider the current open tabs.';
+            return true;
+          }
+          destination = (await chrome.tabs.update(offered.id, { active: true })) || live;
+          if (destination?.windowId !== undefined && chrome.windows?.update) await chrome.windows.update(destination.windowId, { focused: true });
+        } else {
+          targetUrl = await generateStartingUrl(this.settings, this.progress.goal);
+          if (token !== this.runToken) return false;
+          const source = await chrome.tabs.get(tabId);
+          if (token !== this.runToken) return false;
+          if ((source.pendingUrl || source.url) !== snapshot.url) {
+            this.lastStaleNotice = 'The current page changed while choosing a new tab. Reconsider navigation.';
+            return true;
+          }
+          destination = await chrome.tabs.create({ url: targetUrl, active: true, ...(source.windowId !== undefined ? { windowId: source.windowId } : {}) });
+        }
+        if (token !== this.runToken) return false;
+        if (destination?.id === undefined) throw new Error('Could not identify the destination tab.');
+        await this.input.detach();
+        if (token !== this.runToken) return false;
+        this.tabStack.push(tabId);
+        this.activeTabId = destination.id;
+        this.pendingTab = null;
+        this.lastFingerprint = null;
+        this.lastSummary = null;
+        this.inputAttemptedTab = null;
+        this.lastTargetActionId = null;
+        this.targetFailureCount.clear();
+        this.consecutiveStale = 0;
+        this.invalidAnswerRetried = false;
+        this.progress.currentStep++;
+        this.history.push({ step: this.progress.currentStep, action: `${operation} ${targetUrl}`, kind: 'navigate', url: targetUrl, page_changed: true, outcome: `${operation === 'SWITCH_TAB' ? 'switched to an open tab' : 'opened a task tab'}: ${targetUrl}` });
+        this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation, targetLabel: operation === 'SWITCH_TAB' ? 'Switched to an open tab' : 'Opened a task tab', targetValue: targetUrl, latencyMs: Date.now() - started, provider });
+        this.broadcastUpdate();
+        await this.waitForTabToLoad(destination.id);
+        if (token !== this.runToken) return false;
+        await this.ensureContentScriptReady(destination.id);
+        return true;
+      } catch (err: any) {
+        if (token === this.runToken) this.finish('error', `Tab navigation failed: ${err?.message || String(err)}`);
+        return false;
+      }
+    }
 
     // 5. Resolve the target from the selected operation's head only
     let targetAction: PageAction | undefined;

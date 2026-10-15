@@ -862,3 +862,81 @@ describe('new-tab startup', () => {
     expect(jev).not.toHaveBeenCalled();
   });
 });
+
+describe('Browser tab operations', () => {
+  let page: Page;
+  let browser: ReturnType<typeof installChrome>;
+  beforeEach(() => {
+    jev.mockReset(); startingUrl.mockReset();
+    page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    browser = installChrome(page);
+    browser.tabs.query.mockResolvedValue([
+      { id: 7, windowId: 1, url: 'https://example.com/', title: 'Source' },
+      { id: 9, windowId: 1, url: 'https://www.youtube.com/', title: 'YouTube' },
+      { id: 10, windowId: 1, url: 'chrome://settings/', title: 'Settings' },
+      { id: 11, windowId: 1, incognito: true, url: 'https://private.example/', title: 'Private' },
+    ]);
+    browser.tabs.get.mockImplementation(async (id = 7) => ({ id, windowId: 1, status: 'complete', url: id === 9 ? 'https://www.youtube.com/' : 'https://example.com/' }));
+    browser.tabs.update.mockImplementation(async (id: number) => ({ id, windowId: 1 } as any));
+    startingUrl.mockResolvedValue('https://www.youtube.com/');
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  it('switches to an offered open tab, counts one step, and resumes from the source popup', async () => {
+    jev.mockResolvedValueOnce(answer('SWITCH_TAB', { switch_tab_target: { choice: '9', confidence: 1, probabilities: { '9': 1 } } }));
+    const r = runner(); await r.step('Find YouTube OLED videos', 7);
+    expect(r.getProgress()).toMatchObject({ status: 'paused', currentStep: 1 });
+    expect(browser.tabs.update).toHaveBeenCalledWith(9, { active: true });
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+    expect((jev.mock.calls[0][1].state.browser as any).open_tabs.map((tab: any) => tab.id)).toEqual([7, 9]);
+    jev.mockResolvedValue(answer('DONE'));
+    await r.step('Find YouTube OLED videos', 7);
+    expect(r.getProgress().status).toBe('done');
+  });
+  it('opens a new task tab from an unrelated regular page without navigating the source', async () => {
+    jev.mockResolvedValueOnce(answer('OPEN_TAB'));
+    browser.tabs.create.mockResolvedValue({ id: 8, windowId: 1 } as any);
+    const r = runner(); await r.step('Find YouTube OLED videos', 7);
+    expect(browser.tabs.create).toHaveBeenCalledWith({ url: 'https://www.youtube.com/', active: true, windowId: 1 });
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(r.getProgress().logs[0].operation).toBe('OPEN_TAB');
+  });
+  it('never switches to a tab id not offered to the model', async () => {
+    jev.mockResolvedValueOnce(answer('SWITCH_TAB', { switch_tab_target: { choice: '11', confidence: 1, probabilities: { '11': 1 } } }));
+    const r = runner(); await r.step('Go to YouTube', 7);
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(r.getProgress().status).toBe('error');
+  });
+  it('does not switch when the selected tab changed after observation', async () => {
+    jev.mockImplementationOnce(async () => {
+      browser.tabs.get.mockResolvedValue({ id: 9, url: 'https://other.example/', windowId: 1 } as any);
+      return answer('SWITCH_TAB', { switch_tab_target: { choice: '9', confidence: 1, probabilities: { '9': 1 } } });
+    });
+    const r = runner(); await r.step('Go to YouTube', 7);
+    expect(browser.tabs.update).not.toHaveBeenCalled();
+    expect(r.getProgress().currentStep).toBe(0);
+  });
+  it('does not open a tab when stopped while the helper chooses its URL', async () => {
+    const r = runner(); jev.mockResolvedValueOnce(answer('OPEN_TAB'));
+    startingUrl.mockImplementationOnce(async () => { r.stop(); return 'https://www.youtube.com/'; });
+    await r.step('Find YouTube OLED videos', 7);
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('Existing tab bootstrap', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it.each([false, true])('reuses an exact destination unless explicitly asked for a new tab (new=%s)', async (forceNew) => {
+    jev.mockReset(); startingUrl.mockReset(); startingUrl.mockResolvedValue('https://www.youtube.com/');
+    const page: Page = { snapshot: snapshot(), act: () => ({ ok: true, via: 'synthetic' }), sent: [] };
+    const browser = installChrome(page);
+    let sourceUrl = 'chrome://newtab/';
+    browser.tabs.get.mockImplementation(async (id = 7) => ({ id, windowId: 1, status: 'complete', url: id === 7 ? sourceUrl : 'https://www.youtube.com/' }));
+    browser.tabs.update.mockImplementation(async (_id: number, changes: any) => { if (changes.url) sourceUrl = changes.url; return {} as any; });
+    browser.tabs.query.mockResolvedValue([{ id: 9, windowId: 1, title: 'YouTube', url: 'https://www.youtube.com/' }]);
+    const r = runner(); await r.step(forceNew ? 'Open a new tab for YouTube' : 'Find YouTube OLED tests', 7);
+    expect(r.getProgress().status).toBe('paused');
+    if (forceNew) expect(browser.tabs.update).toHaveBeenCalledWith(7, { url: 'https://www.youtube.com/' });
+    else expect(browser.tabs.update).toHaveBeenCalledWith(9, { active: true });
+    expect(browser.tabs.create).not.toHaveBeenCalled();
+  });
+});
