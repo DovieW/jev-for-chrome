@@ -343,7 +343,9 @@ describe("request instrumentation", () => {
       "fetch",
       vi
         .fn()
-        .mockResolvedValueOnce(new Response("", { status: 429 }))
+        .mockResolvedValueOnce(
+          new Response('{"error":{"message":"Rate limited"}}', { status: 429 }),
+        )
         .mockResolvedValueOnce(new Response('{"answers":{}}')),
     );
     const record = recorder(new RunHistoryStore(storage(), () => {}));
@@ -368,5 +370,100 @@ describe("request instrumentation", () => {
       record.run.nodes.find((node) => node.kind === "wait")?.durationMs,
     ).toBe(800);
     expect(JSON.stringify(record.run)).not.toContain("Authorization");
+    expect(
+      record.run.nodes.find((node) => node.kind === "request")?.output,
+    ).toEqual({
+      httpStatus: 429,
+      response: { error: { message: "Rate limited" } },
+      responseBodyTruncated: false,
+      retrying: true,
+    });
+  });
+
+  it("retains structured HTTP error responses and redacts echoed credentials", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              message: "Invalid key private-test-key",
+              code: "invalid_api_key",
+            },
+          }),
+          { status: 401 },
+        ),
+      ),
+    );
+    const store = new RunHistoryStore(storage(), () => {});
+    const record = recorder(store);
+    const span = record.span("helper", "Generate text");
+    await expect(
+      postJson("https://example.com", {}, {}, { trace: span }),
+    ).rejects.toThrow("HTTP 401");
+    span.fail(new Error("Text helper failed"));
+    record.finish("error", 0);
+    await record.flush();
+    const request = (await store.list())[0].nodes.find(
+      (node) => node.kind === "request",
+    );
+    expect(request).toMatchObject({
+      status: "error",
+      output: {
+        httpStatus: 401,
+        response: { error: { code: "invalid_api_key" } },
+        responseBodyTruncated: false,
+        retrying: false,
+      },
+    });
+    expect(request?.output.response.error.message).toContain("[redacted]");
+    expect(JSON.stringify(request)).not.toContain("private-test-key");
+  });
+
+  it("bounds oversized text error bodies and explicitly records truncation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(new Response("x".repeat(10000), { status: 400 })),
+    );
+    const record = recorder(new RunHistoryStore(storage(), () => {}));
+    const span = record.span("decision", "Choose");
+    await expect(
+      postJson("https://example.com", {}, {}, { trace: span }),
+    ).rejects.toThrow("HTTP 400");
+    const request = record.run.nodes.find((node) => node.kind === "request");
+    expect(request?.output.response).toHaveLength(8000);
+    expect(request?.output.responseBodyTruncated).toBe(true);
+    expect(request?.output.retrying).toBe(false);
+  });
+
+  it("keeps unreadable bodies missing while preserving the HTTP status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => {
+            throw new Error("Read failed");
+          },
+        })
+        .mockResolvedValueOnce(new Response("Not JSON")),
+    );
+    const record = recorder(new RunHistoryStore(storage(), () => {}));
+    const span = record.span("decision", "Choose");
+    await expect(
+      postJson("https://example.com", {}, {}, { trace: span }),
+    ).rejects.toThrow("HTTP 400");
+    await expect(
+      postJson("https://example.com", {}, {}, { trace: span }),
+    ).rejects.toThrow();
+    const requests = record.run.nodes.filter((node) => node.kind === "request");
+    expect(requests.map((node) => node.output.httpStatus)).toEqual([400, 200]);
+    expect(requests.every((node) => node.output.response === undefined)).toBe(
+      true,
+    );
   });
 });

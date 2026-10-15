@@ -1,12 +1,16 @@
-import type { TraceSpan } from '../trace';
+import type { TraceSpan } from "../trace";
 const TRANSIENT_STATUSES = new Set([429, 503, 529]);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class ProviderHttpError extends Error {
-  constructor(public status: number, public detail: string, label: string) {
-    super(`${label} error (HTTP ${status})${detail ? `: ${detail}` : ''}`);
-    this.name = 'ProviderHttpError';
+  constructor(
+    public status: number,
+    public detail: string,
+    label: string,
+  ) {
+    super(`${label} error (HTTP ${status})${detail ? `: ${detail}` : ""}`);
+    this.name = "ProviderHttpError";
   }
 }
 
@@ -18,23 +22,34 @@ export async function postJson(
   url: string,
   headers: Record<string, string>,
   body: unknown,
-  options: { retries?: number; label?: string; traceLabel?: string; trace?: TraceSpan } = {}
+  options: {
+    retries?: number;
+    label?: string;
+    traceLabel?: string;
+    trace?: TraceSpan;
+  } = {},
 ): Promise<any> {
   const retries = options.retries ?? 3;
-  const label = options.label || 'Model provider';
+  const label = options.label || "Model provider";
 
   for (let attempt = 0; ; attempt++) {
-    const request = options.trace?.child('request', `${options.traceLabel || label} · attempt ${attempt + 1}`, body);
+    const request = options.trace?.child(
+      "request",
+      `${options.traceLabel || label} · attempt ${attempt + 1}`,
+      body,
+    );
     const backoff = async () => {
-      const wait = options.trace?.child('wait', 'Retry backoff', { delayMs: 800 * 2 ** attempt });
+      const wait = options.trace?.child("wait", "Retry backoff", {
+        delayMs: 800 * 2 ** attempt,
+      });
       await sleep(800 * 2 ** attempt);
       wait?.end();
     };
     let response: Response;
     try {
       response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify(body),
       });
     } catch (err: any) {
@@ -47,35 +62,63 @@ export async function postJson(
         await backoff();
         continue;
       }
-      throw new Error(`${label} connection failed (${err?.message || String(err)}); no action executed.`);
-    }
-
-    if (TRANSIENT_STATUSES.has(response.status) && attempt < retries) {
-      request?.end({ httpStatus: response.status, retrying: true }, 'error');
-      await backoff();
-      continue;
+      throw new Error(
+        `${label} connection failed (${err?.message || String(err)}); no action executed.`,
+      );
     }
 
     if (!response.ok) {
-      let detail = '';
+      let errorBody: string | undefined;
       try {
-        detail = (await response.text()).slice(0, 300);
+        errorBody = await response.text();
       } catch {
         // ignore unreadable body
       }
-      const error = new ProviderHttpError(response.status, detail, label);
-      request?.fail(error);
+      const error = new ProviderHttpError(
+        response.status,
+        errorBody?.slice(0, 300) ?? "",
+        label,
+      );
+      let captured: unknown = errorBody?.slice(0, 8000);
+      if (errorBody && errorBody.length <= 8000) {
+        try {
+          captured = JSON.parse(errorBody);
+        } catch {
+          /* retain text response */
+        }
+      }
+      const retrying =
+        TRANSIENT_STATUSES.has(response.status) && attempt < retries;
+      request?.fail(error, {
+        httpStatus: response.status,
+        response: captured,
+        responseBodyTruncated: (errorBody?.length ?? 0) > 8000,
+        retrying,
+      });
+      if (retrying) {
+        await backoff();
+        continue;
+      }
       throw error;
     }
 
     try {
       const json = await response.json();
       // Keep returned answers and text, never a provider's private reasoning field.
-      const output = json?.choices ? { model: json.model, usage: json.usage, choices: json.choices.map((choice: any) => ({ message: { content: choice.message?.content }, finish_reason: choice.finish_reason })) } : json;
+      const output = json?.choices
+        ? {
+            model: json.model,
+            usage: json.usage,
+            choices: json.choices.map((choice: any) => ({
+              message: { content: choice.message?.content },
+              finish_reason: choice.finish_reason,
+            })),
+          }
+        : json;
       request?.end({ httpStatus: response.status, response: output });
       return json;
     } catch (error) {
-      request?.fail(error);
+      request?.fail(error, { httpStatus: response.status });
       throw error;
     }
   }

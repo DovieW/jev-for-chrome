@@ -308,10 +308,10 @@ export class RunRecorder {
         this.run.updatedAt = Date.now();
         this.checkpoint();
       },
-      fail: (error) => {
+      fail: (error, output) => {
         if (this.closed || node.status !== "running") return;
         node.error = sanitizeTrace(message(error), this.secrets);
-        span.end(undefined, "error");
+        span.end(output, "error");
       },
       event: (label, output, status = "ok") =>
         span.child("check", label).end(output, status),

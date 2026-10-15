@@ -49,7 +49,7 @@ export interface RunTrace {
 export interface TraceSpan {
   child(kind: TraceKind, label: string, input?: unknown): TraceSpan;
   end(output?: unknown, status?: TraceStatus): void;
-  fail(error: unknown): void;
+  fail(error: unknown, output?: unknown): void;
   event(label: string, output?: unknown, status?: TraceStatus): void;
   measure<T>(
     kind: TraceKind,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Braces,
@@ -13,11 +13,15 @@ import {
   Settings2,
   Trash2,
   X,
+  FolderOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ModelCalls } from "./ModelCalls";
+import { parseRunExport } from "./exchanges";
 import { Brand, PROVIDER_LABELS, sendMessage } from "../ui/app";
 import type { RunTrace, TraceNode } from "../shared/trace";
 import {
@@ -438,10 +442,12 @@ function RunDetail({
   run,
   now,
   onDelete,
+  imported = false,
 }: {
   run: RunTrace;
   now: number;
   onDelete: (id?: string) => void;
+  imported?: boolean;
 }) {
   const [issuesOnly, setIssuesOnly] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -486,14 +492,16 @@ function RunDetail({
             <Download />
             Export JSON
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Delete this run"
-            onClick={() => setConfirmDelete(!confirmDelete)}
-          >
-            <Trash2 className="size-4 text-muted-foreground" />
-          </Button>
+          {!imported && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Delete this run"
+              onClick={() => setConfirmDelete(!confirmDelete)}
+            >
+              <Trash2 className="size-4 text-muted-foreground" />
+            </Button>
+          )}
         </div>
       </div>
       {confirmDelete && (
@@ -603,69 +611,80 @@ function RunDetail({
           is excluded.
         </p>
       </section>
-      <div className="mb-4 mt-7 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="flex items-center gap-2 text-sm font-medium">
-            <GitBranch className="size-4 text-muted-foreground" />
-            Decision path
-          </h3>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Choices, alternatives, and execution checks. Expand any event.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setExpanded(!expanded);
-              setExpandVersion((version) => version + 1);
-            }}
-          >
-            {expanded ? "Collapse all" : "Expand all"}
-          </Button>
-          <Switch
-            id="issues-only"
-            checked={issuesOnly}
-            onCheckedChange={setIssuesOnly}
-          />
-          <Label htmlFor="issues-only" className="text-xs">
-            Issues only
-          </Label>
-        </div>
-      </div>
-      {issuesOnly && !problems.length ? (
-        <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
-          No failed or reconsidered events in this run.
-        </div>
-      ) : (
-        <div className="trace-tree">
-          {run.nodes
-            .filter((node) => !node.parentId)
-            .map((node) => (
-              <NodeView
-                key={node.id}
-                node={node}
-                run={run}
-                now={now}
-                issuesOnly={issuesOnly}
-                expandVersion={expandVersion}
-                expanded={expanded}
+      <Tabs defaultValue="calls" className="mt-7">
+        <TabsList aria-label="Run view">
+          <TabsTrigger value="calls">Model calls</TabsTrigger>
+          <TabsTrigger value="execution">Execution trace</TabsTrigger>
+        </TabsList>
+        <TabsContent value="calls">
+          <ModelCalls run={run} now={now} />
+        </TabsContent>
+        <TabsContent value="execution">
+          <div className="mb-4 mt-5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-sm font-medium">
+                <GitBranch className="size-4 text-muted-foreground" />
+                Decision path
+              </h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Choices, alternatives, and execution checks. Expand any event.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setExpanded(!expanded);
+                  setExpandVersion((version) => version + 1);
+                }}
+              >
+                {expanded ? "Collapse all" : "Expand all"}
+              </Button>
+              <Switch
+                id="issues-only"
+                checked={issuesOnly}
+                onCheckedChange={setIssuesOnly}
               />
-            ))}
-        </div>
-      )}
-      {!run.nodes.length && (
-        <p className="py-8 text-center text-sm text-muted-foreground">
-          Waiting for the first event…
-        </p>
-      )}
-      <p className="mt-5 text-[11px] leading-relaxed text-muted-foreground">
-        Probabilities are reported by the provider; a single available target
-        may be selected locally. This view shows recorded inputs, answers, and
-        checks—not private model reasoning. Parent timings include their child
-        events.
-      </p>
+              <Label htmlFor="issues-only" className="text-xs">
+                Issues only
+              </Label>
+            </div>
+          </div>
+          {issuesOnly && !problems.length ? (
+            <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
+              No failed or reconsidered events in this run.
+            </div>
+          ) : (
+            <div className="trace-tree">
+              {run.nodes
+                .filter((node) => !node.parentId)
+                .map((node) => (
+                  <NodeView
+                    key={node.id}
+                    node={node}
+                    run={run}
+                    now={now}
+                    issuesOnly={issuesOnly}
+                    expandVersion={expandVersion}
+                    expanded={expanded}
+                  />
+                ))}
+            </div>
+          )}
+          {!run.nodes.length && (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Waiting for the first event…
+            </p>
+          )}
+          <p className="mt-5 text-[11px] leading-relaxed text-muted-foreground">
+            Probabilities are reported by the provider; a single available
+            target may be selected locally. This view shows recorded inputs,
+            answers, and checks—not private model reasoning. Parent timings
+            include their child events.
+          </p>
+        </TabsContent>
+      </Tabs>
     </article>
   );
 }
@@ -679,7 +698,9 @@ export function History() {
   const [error, setError] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const run = runs.find((run) => run.id === selected) ?? runs[0];
+  const [imported, setImported] = useState<RunTrace | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const run = imported ?? runs.find((run) => run.id === selected) ?? runs[0];
   useEffect(() => {
     let live = true,
       version = 0;
@@ -715,10 +736,10 @@ export function History() {
     };
   }, []);
   useEffect(() => {
-    if (run?.status !== "running") return;
+    if (run?.status !== "running" || imported) return;
     const timer = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(timer);
-  }, [run?.status]);
+  }, [run?.status, imported]);
   const remove = async (id?: string) => {
     try {
       const result = await sendMessage<{ runs: RunTrace[] }>({
@@ -727,6 +748,17 @@ export function History() {
       });
       setRuns(result.runs);
       setConfirmClear(false);
+      setError("");
+    } catch (error) {
+      setError((error as Error).message);
+    }
+  };
+  const openExport = async (file?: File) => {
+    if (!file) return;
+    try {
+      if (file.size > 8_000_000)
+        throw new Error("Choose a run export smaller than 8 MB.");
+      setImported(parseRunExport(await file.text()));
       setError("");
     } catch (error) {
       setError((error as Error).message);
@@ -759,20 +791,53 @@ export function History() {
               See what Jev saw, chose, and did.
             </p>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!runs.length}
-            onClick={() => setConfirmClear(!confirmClear)}
-          >
-            <Trash2 />
-            Clear history
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              aria-label="Open run export"
+              onChange={(event) => {
+                void openExport(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fileInput.current?.click()}
+            >
+              <FolderOpen />
+              Open JSON
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!runs.length}
+              onClick={() => setConfirmClear(!confirmClear)}
+            >
+              <Trash2 />
+              Clear history
+            </Button>
+          </div>
         </div>
         {error && (
           <div role="alert" className="run-error">
             <CircleAlert className="size-4 shrink-0" />
             {error}
+          </div>
+        )}
+        {imported && (
+          <div className="import-notice">
+            <p>
+              <strong>Viewing an exported run.</strong> Opened locally for
+              inspection; saved history is unchanged.
+            </p>
+            <Button variant="ghost" size="sm" onClick={() => setImported(null)}>
+              <X />
+              Close file
+            </Button>
           </div>
         )}
         {confirmClear && (
@@ -825,6 +890,7 @@ export function History() {
                     className={`run-list-item ${item.id === run.id ? "selected" : ""}`}
                     aria-current={item.id === run.id ? "true" : undefined}
                     onClick={() => {
+                      setImported(null);
                       setSelected(item.id);
                       window.history.replaceState(null, "", `?run=${item.id}`);
                     }}
@@ -860,7 +926,13 @@ export function History() {
                 audio are excluded.
               </p>
             </aside>
-            <RunDetail key={run.id} run={run} now={now} onDelete={remove} />
+            <RunDetail
+              key={`${imported ? "imported-" : ""}${run.id}`}
+              run={run}
+              now={imported ? run.updatedAt : now}
+              onDelete={remove}
+              imported={Boolean(imported)}
+            />
           </div>
         )}
       </main>

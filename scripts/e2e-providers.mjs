@@ -404,11 +404,16 @@ try {
   const switched = saved.find(r => r.goal.startsWith('Open tab regression'));
   const switchCycle = switched.nodes.find(n => n.kind === 'decision' && n.output?.answers?.operation?.choice === 'SWITCH_TAB');
   assert.equal(switched.nodes.filter(n => n.parentId === switchCycle.id && n.kind === 'request').length, 2);
+  await historyPage.locator('.exchange-card').first().waitFor();
+  assert.match(await historyPage.locator('.exchange-card').first().innerText(), /HTTP 400/);
+  assert.match(await historyPage.locator('.exchange-card').first().innerText(), /max_tokens_exceeded/);
+  await historyPage.getByRole('tab', { name: 'Execution trace', exact: true }).click();
   await historyPage.getByRole('switch', { name: 'Issues only' }).click();
   await historyPage.getByText('Context limit reached', { exact: true }).first().waitFor();
   await historyPage.screenshot({ path: '.e2e-out/history-retries.png', fullPage: true });
   await historyPage.getByRole('switch', { name: 'Issues only' }).click();
   await historyPage.locator('.run-list-item').filter({ hasText: 'Open tab regression' }).click();
+  await historyPage.getByRole('tab', { name: 'Execution trace', exact: true }).click();
   await historyPage.getByText('Target for Switch tab', { exact: true }).waitFor();
   const requestNode = historyPage.locator('.trace-request').first();
   await requestNode.locator(':scope > summary').click();
@@ -431,6 +436,7 @@ try {
   await historyPage.screenshot({ path: '.e2e-out/history-mobile.png', fullPage: true });
   await historyPage.setViewportSize({ width: 1280, height: 900 });
   await historyPage.reload();
+  await historyPage.getByRole('tab', { name: 'Execution trace', exact: true }).click();
   await historyPage.getByText('Target for Switch tab', { exact: true }).waitFor();
   assert.equal((await readHistory()).runs.length, 5);
 

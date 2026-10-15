@@ -14,7 +14,8 @@
     "e2e:input": "npm run build && tsx scripts/e2e-input.ts",
     "e2e:providers": "npm run build && node scripts/e2e-providers.mjs",
     "icons": "node scripts/render-icons.mjs",
-    "e2e:voice": "npm run build && node scripts/e2e-voice.mjs"
+    "e2e:voice": "npm run build && node scripts/e2e-voice.mjs",
+    "e2e:history": "npm run build && node scripts/e2e-history.mjs"
   },
   "keywords": [
     "browser-agent",
