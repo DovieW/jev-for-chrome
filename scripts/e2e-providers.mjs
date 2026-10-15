@@ -383,6 +383,86 @@ try {
   await densePopup.locator('.popup-shell').screenshot({ path: '.e2e-out/typesafe-context-recovery.png' });
   console.log('PASS TypeSafe context-limit recovery on a dense page, stable target ids, and one trusted action');
 
+  // Inspect traces produced by real extension execution, not hand-authored UI fixtures.
+  const historyEvent = context.waitForEvent('page');
+  await options.getByRole('link', { name: 'Run history', exact: true }).click();
+  const historyPage = await historyEvent;
+  await historyPage.waitForLoadState();
+  await historyPage.getByRole('heading', { name: 'Run history', exact: true }).waitFor();
+  await poll(() => historyPage.locator('.run-list-item').count(), n => n === 5);
+  const readHistory = () => historyPage.evaluate(() => chrome.runtime.sendMessage({ type: 'GET_RUN_HISTORY' }));
+  let saved = (await readHistory()).runs;
+  assert.equal(saved.length, 5);
+  assert.equal(saved[0].status, 'paused');
+  const denseTrace = saved[0];
+  assert.equal(denseTrace.steps, 1);
+  assert.equal(denseTrace.nodes.filter(n => n.kind === 'cycle').length, 1);
+  assert.equal(denseTrace.nodes.filter(n => n.kind === 'request' && n.status === 'error').length, 2);
+  assert.ok(denseTrace.nodes.some(n => n.label === 'Wait for page to settle' && n.durationMs >= 0));
+  assert.ok(!JSON.stringify(saved).includes('dummy-'), 'Credentials never reach saved traces');
+  assert.equal(saved.filter(r => r.goal.startsWith('Open tab regression')).length, 1, 'Stepping keeps one trace');
+  const switched = saved.find(r => r.goal.startsWith('Open tab regression'));
+  const switchCycle = switched.nodes.find(n => n.kind === 'decision' && n.output?.answers?.operation?.choice === 'SWITCH_TAB');
+  assert.equal(switched.nodes.filter(n => n.parentId === switchCycle.id && n.kind === 'request').length, 2);
+  await historyPage.getByRole('switch', { name: 'Issues only' }).click();
+  await historyPage.getByText('Context limit reached', { exact: true }).first().waitFor();
+  await historyPage.screenshot({ path: '.e2e-out/history-retries.png', fullPage: true });
+  await historyPage.getByRole('switch', { name: 'Issues only' }).click();
+  await historyPage.locator('.run-list-item').filter({ hasText: 'Open tab regression' }).click();
+  await historyPage.getByText('Target for Switch tab', { exact: true }).waitFor();
+  const requestNode = historyPage.locator('.trace-request').first();
+  await requestNode.locator(':scope > summary').click();
+  await requestNode.getByText('Request body', { exact: true }).click();
+  assert.match(await requestNode.locator('pre').innerText(), /operation/);
+  await historyPage.getByRole('button', { name: 'Collapse all', exact: true }).click();
+  await poll(() => historyPage.locator('.trace-cycle[open]').count(), count => count === 0);
+  await historyPage.screenshot({ path: '.e2e-out/history-overview.png' });
+  await historyPage.getByRole('button', { name: 'Expand all', exact: true }).click();
+  await poll(() => historyPage.locator('.trace-cycle[open]').count(), count => count === 3);
+  await historyPage.screenshot({ path: '.e2e-out/history-decisions.png', fullPage: true });
+  const downloadEvent = historyPage.waitForEvent('download');
+  await historyPage.getByRole('button', { name: 'Export JSON', exact: true }).click();
+  const download = await downloadEvent;
+  const exported = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+  assert.equal(exported.id, switched.id);
+  assert.ok(exported.nodes.some(n => n.kind === 'decision'));
+  await historyPage.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await historyPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'History fits a narrow viewport');
+  await historyPage.screenshot({ path: '.e2e-out/history-mobile.png', fullPage: true });
+  await historyPage.setViewportSize({ width: 1280, height: 900 });
+  await historyPage.reload();
+  await historyPage.getByText('Target for Switch tab', { exact: true }).waitFor();
+  assert.equal((await readHistory()).runs.length, 5);
+
+  // Restart the MV3 worker, then inspect persisted data with a fresh RunHistoryStore.
+  const historyCdp = await context.newCDPSession(historyPage);
+  let versionId;
+  historyCdp.on('ServiceWorker.workerVersionUpdated', ({ versions }) => {
+    const version = versions.find(v => v.scriptURL === `chrome-extension://${extension}/background.js` && v.runningStatus === 'running');
+    if (version) versionId = version.versionId;
+  });
+  await historyCdp.send('ServiceWorker.enable');
+  await poll(() => Promise.resolve(versionId), Boolean);
+  await historyCdp.send('ServiceWorker.stopWorker', { versionId });
+  await historyPage.reload();
+  await historyPage.locator('.run-list-item').first().waitFor();
+  saved = (await readHistory()).runs;
+  assert.equal(saved[0].status, 'interrupted', 'Paused tasks cannot silently resume after a worker restart');
+  assert.equal(saved.find(r => r.id === switched.id).status, 'done');
+  assert.equal(saved.find(r => r.id === switched.id).nodes.length, switched.nodes.length);
+  await historyCdp.detach();
+  await historyPage.getByRole('button', { name: 'Delete this run' }).click();
+  await historyPage.getByRole('button', { name: 'Delete run', exact: true }).click();
+  await poll(() => historyPage.locator('.run-list-item').count(), n => n === 4);
+  await historyPage.getByRole('button', { name: 'Clear history', exact: true }).click();
+  await historyPage.getByRole('button', { name: 'Delete all runs', exact: true }).click();
+  await historyPage.getByRole('heading', { name: 'No runs yet' }).waitFor();
+  await historyPage.screenshot({ path: '.e2e-out/history-empty.png' });
+  await historyPage.reload();
+  await historyPage.getByRole('heading', { name: 'No runs yet' }).waitFor();
+  console.log('PASS five-run history, staged choices, retry timings, export, responsive UI, worker restart, and deletion');
+
+
 } finally {
   await context?.close();
   await new Promise((resolve) => server.close(resolve));

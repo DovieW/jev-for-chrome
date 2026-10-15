@@ -11,6 +11,7 @@ import {
   Loader2,
   ChevronRight,
   ShieldCheck,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -340,11 +341,19 @@ export const Options: React.FC = () => {
         </div>
       </header>
       <main className="mx-auto max-w-[1000px] px-6 pb-10 pt-10">
-        <div className="mb-8">
-          <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Choose your models and customize how Jev runs.
-          </p>
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Choose your models and customize how Jev runs.
+            </p>
+          </div>
+          <Button variant="outline" asChild>
+            <a href="history.html" target="_blank" rel="noopener">
+              <History />
+              Run history
+            </a>
+          </Button>
         </div>
         {error && (
           <div

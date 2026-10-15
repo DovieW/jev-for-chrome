@@ -1,3 +1,4 @@
+import type { TraceSpan } from './trace';
 import { parseFieldText } from 'jev-dev-kit';
 import { STARTING_URL_PROMPT, TEXT_VALUE_PROMPT } from './prompts';
 
@@ -86,14 +87,15 @@ export function describeHelperKey(settings: AppSettings): HelperKeyStatus {
  */
 export async function generateFieldText(
   settings: AppSettings,
-  context: FieldContext
+  context: FieldContext,
+  trace?: TraceSpan
 ): Promise<string> {
-  return parseFieldText(await requestHelper(settings, TEXT_VALUE_PROMPT, context));
+  return parseFieldText(await requestHelper(settings, TEXT_VALUE_PROMPT, context, trace));
 }
 
 /** A bootstrap request has no page to observe and returns a URL, never executable code. */
-export async function generateStartingUrl(settings: AppSettings, goal: string): Promise<string> {
-  const raw = await requestHelper(settings, STARTING_URL_PROMPT, { goal });
+export async function generateStartingUrl(settings: AppSettings, goal: string, trace?: TraceSpan): Promise<string> {
+  const raw = await requestHelper(settings, STARTING_URL_PROMPT, { goal }, trace);
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error('Starting URL helper returned invalid JSON.'); }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !('url' in value) || typeof value.url !== 'string') {
@@ -107,7 +109,7 @@ export async function generateStartingUrl(settings: AppSettings, goal: string): 
   return url.href;
 }
 
-async function requestHelper(settings: AppSettings, prompt: string, context: unknown): Promise<string> {
+async function requestHelper(settings: AppSettings, prompt: string, context: unknown, trace?: TraceSpan): Promise<string> {
   const cfg = settings.textHelper;
   const status = describeHelperKey(settings);
   const { baseUrl, model } = status;
@@ -145,7 +147,7 @@ async function requestHelper(settings: AppSettings, prompt: string, context: unk
     `${baseUrl}/chat/completions`,
     { Authorization: `Bearer ${apiKey}`, ...(isOpenRouter ? OPENROUTER_HEADERS : {}) },
     payload,
-    { label: 'Text helper' }
+    { label: 'Text helper', trace }
   );
 
   const rawContent = json?.choices?.[0]?.message?.content;

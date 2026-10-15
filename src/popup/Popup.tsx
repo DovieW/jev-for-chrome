@@ -13,6 +13,7 @@ import {
   CircleAlert,
   ListFilter,
   Mic,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -283,6 +284,23 @@ export const Popup: React.FC = () => {
       <header className="flex items-center justify-between border-b px-5 py-4">
         <Brand compact />
         <div className="flex items-center gap-1">
+          <Hint text="Run history">
+            <Button
+              aria-label="Run history"
+              size="icon-sm"
+              variant="ghost"
+              className="text-muted-foreground"
+              asChild
+            >
+              <a
+                href={`history.html${progress.runId ? `?run=${encodeURIComponent(progress.runId)}` : ""}`}
+                target="_blank"
+                rel="noopener"
+              >
+                <History className="size-4" />
+              </a>
+            </Button>
+          </Hint>
           <Hint text="Record a voice task">
             <Button
               aria-label="Record a voice task"
@@ -326,7 +344,9 @@ export const Popup: React.FC = () => {
           <Label htmlFor="goal" className="text-sm font-medium">
             What would you like to do?
           </Label>
-          <span className="text-[10px] text-muted-foreground">Browser tabs</span>
+          <span className="text-[10px] text-muted-foreground">
+            Browser tabs
+          </span>
         </div>
         <Textarea
           id="goal"

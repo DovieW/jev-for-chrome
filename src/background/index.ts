@@ -1,8 +1,10 @@
 import { AppSettings, ExtensionMessage, mergeSettings } from '../shared/types';
 import { AgentRunner } from './agent';
 import { installVoice } from './voice';
+import { RunHistoryStore } from './run-history';
 
-const runner = new AgentRunner();
+const runHistory = new RunHistoryStore();
+const runner = new AgentRunner(runHistory);
 
 async function getStoredSettings(): Promise<AppSettings> {
   const result = await chrome.storage.local.get(['jev_settings']);
@@ -46,6 +48,15 @@ chrome.runtime.onMessage.addListener(
     (async () => {
       try {
         switch (message.type) {
+          case 'GET_RUN_HISTORY':
+          case 'DELETE_RUN_HISTORY': {
+            const url = _sender.url?.split(/[?#]/)[0];
+            if (_sender.id !== chrome.runtime.id || !['history.html', 'popup.html', 'options.html'].some(page => url === chrome.runtime.getURL(page))) throw new Error('Run history is only available in extension pages.');
+            if (message.type === 'DELETE_RUN_HISTORY') await runHistory.delete(message.id);
+            sendResponse({ success: true, runs: await runHistory.list(), warning: runHistory.error });
+            return;
+          }
+          case 'RUN_HISTORY_UPDATED': return;
           case 'GET_SETTINGS': {
             sendResponse({ type: 'SETTINGS_RESPONSE', settings: await getStoredSettings() });
             return;

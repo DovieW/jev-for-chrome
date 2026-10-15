@@ -1,3 +1,4 @@
+import type { TraceSpan } from '../trace';
 import { JevRequest, JevResponse, OBSOLETE_OPENROUTER_JEV_MODELS, OpenRouterConfig } from '../types';
 import { postJson } from './http';
 
@@ -20,7 +21,8 @@ export const OPENROUTER_HEADERS = {
 
 export async function callOpenRouter(
   config: OpenRouterConfig,
-  request: JevRequest
+  request: JevRequest,
+  trace?: TraceSpan
 ): Promise<JevResponse> {
   const apiKey = (config.apiKey || '').trim();
   if (!apiKey) {
@@ -36,7 +38,7 @@ export async function callOpenRouter(
       endpoint,
       { Authorization: `Bearer ${apiKey}`, ...OPENROUTER_HEADERS },
       { model, state: request.state, questions: request.questions },
-      { label: 'OpenRouter Decisions API' }
+      { label: 'OpenRouter Decisions API', trace }
     );
   } catch (err: any) {
     const message = err?.message || String(err);

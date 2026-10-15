@@ -300,6 +300,7 @@ export interface AgentStepLog {
 }
 
 export interface AgentProgress {
+  runId?: string;
   status: AgentStatus;
   goal: string;
   currentStep: number;
@@ -312,6 +313,9 @@ export interface AgentProgress {
 
 // Messages between Extension components
 export type ExtensionMessage =
+  | { type: 'GET_RUN_HISTORY' }
+  | { type: 'DELETE_RUN_HISTORY'; id?: string }
+  | { type: 'RUN_HISTORY_UPDATED' }
   | { type: 'VOICE_STATE'; state: import('../voice/types').VoiceState }
   | { type: 'GET_SETTINGS' }
   | { type: 'SETTINGS_RESPONSE'; settings: AppSettings }

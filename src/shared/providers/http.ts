@@ -1,3 +1,4 @@
+import type { TraceSpan } from '../trace';
 const TRANSIENT_STATUSES = new Set([429, 503, 529]);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -17,12 +18,18 @@ export async function postJson(
   url: string,
   headers: Record<string, string>,
   body: unknown,
-  options: { retries?: number; label?: string } = {}
+  options: { retries?: number; label?: string; traceLabel?: string; trace?: TraceSpan } = {}
 ): Promise<any> {
   const retries = options.retries ?? 3;
   const label = options.label || 'Model provider';
 
   for (let attempt = 0; ; attempt++) {
+    const request = options.trace?.child('request', `${options.traceLabel || label} · attempt ${attempt + 1}`, body);
+    const backoff = async () => {
+      const wait = options.trace?.child('wait', 'Retry backoff', { delayMs: 800 * 2 ** attempt });
+      await sleep(800 * 2 ** attempt);
+      wait?.end();
+    };
     let response: Response;
     try {
       response = await fetch(url, {
@@ -31,19 +38,21 @@ export async function postJson(
         body: JSON.stringify(body),
       });
     } catch (err: any) {
+      request?.fail(err);
       // fetch itself throwing (DNS failure, connection reset, "Failed to fetch" from a
       // service worker) is retried the same as a transient status: model requests are
       // idempotent, and the body sent above is a fresh JSON string per attempt, not a
       // stream a prior attempt could have consumed, so resending it is safe.
       if (attempt < retries) {
-        await sleep(800 * 2 ** attempt); // 0.8 s, 1.6 s, 3.2 s: same backoff as transient statuses
+        await backoff();
         continue;
       }
       throw new Error(`${label} connection failed (${err?.message || String(err)}); no action executed.`);
     }
 
     if (TRANSIENT_STATUSES.has(response.status) && attempt < retries) {
-      await sleep(800 * 2 ** attempt); // 0.8 s, 1.6 s, 3.2 s: shared text-model routes rate-limit briefly
+      request?.end({ httpStatus: response.status, retrying: true }, 'error');
+      await backoff();
       continue;
     }
 
@@ -54,9 +63,20 @@ export async function postJson(
       } catch {
         // ignore unreadable body
       }
-      throw new ProviderHttpError(response.status, detail, label);
+      const error = new ProviderHttpError(response.status, detail, label);
+      request?.fail(error);
+      throw error;
     }
 
-    return response.json();
+    try {
+      const json = await response.json();
+      // Keep returned answers and text, never a provider's private reasoning field.
+      const output = json?.choices ? { model: json.model, usage: json.usage, choices: json.choices.map((choice: any) => ({ message: { content: choice.message?.content }, finish_reason: choice.finish_reason })) } : json;
+      request?.end({ httpStatus: response.status, response: output });
+      return json;
+    } catch (error) {
+      request?.fail(error);
+      throw error;
+    }
   }
 }

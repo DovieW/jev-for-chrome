@@ -1,3 +1,4 @@
+import type { TraceSpan } from '../trace';
 import { AppSettings, JevRequest, JevResponse } from '../types';
 import { callCloudflare } from './cloudflare';
 import { callOpenRouter } from './openrouter';
@@ -22,17 +23,18 @@ export function activeJevModel(settings: AppSettings): string {
 
 export async function callJevProvider(
   settings: AppSettings,
-  request: JevRequest
+  request: JevRequest,
+  trace?: TraceSpan
 ): Promise<JevResponse> {
   switch (settings.activeProvider) {
     case 'openai':
-      return callOpenAI(settings.openai, request);
+      return callOpenAI(settings.openai, request, trace);
     case 'typesafe':
-      return callTypeSafe(settings.typesafe, request);
+      return callTypeSafe(settings.typesafe, request, trace);
     case 'openrouter':
-      return callOpenRouter(settings.openrouter, request);
+      return callOpenRouter(settings.openrouter, request, trace);
     case 'cloudflare':
-      return callCloudflare(settings.cloudflare, request);
+      return callCloudflare(settings.cloudflare, request, trace);
     default:
       throw new Error(`Unsupported Jev provider: ${String(settings.activeProvider)}`);
   }

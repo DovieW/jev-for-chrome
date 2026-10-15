@@ -1,3 +1,4 @@
+import type { TraceSpan } from '../trace';
 import { JevRequest, JevResponse, TypeSafeConfig } from '../types';
 import { NEXT_ACTION_RULES, TARGET_RULES } from '../prompts';
 import { postJson, ProviderHttpError } from './http';
@@ -63,7 +64,8 @@ function isContextLimit(error: unknown): boolean {
 
 export async function callTypeSafe(
   config: TypeSafeConfig,
-  request: JevRequest
+  request: JevRequest,
+  trace?: TraceSpan
 ): Promise<JevResponse> {
   const apiKey = (config.apiKey || '').trim();
   if (!apiKey) {
@@ -80,10 +82,11 @@ export async function callTypeSafe(
         endpoint,
         { Authorization: `Bearer ${apiKey}` },
         { model, state: compact.state, questions: compact.questions },
-        { label: 'TypeSafe API' }
+        { label: 'TypeSafe API', traceLabel: `TypeSafe · input compression ${level}`, trace }
       ) as JevResponse;
     } catch (error) {
       if (!isContextLimit(error)) throw error;
+      trace?.event('Context limit reached', { compactionLevel: level, retrying: level < 2 }, 'skipped');
       if (level === 2) {
         throw new Error('This page exceeds TypeSafe’s context limit even after shortening it. Try a simpler page or choose another decision provider in Settings. No action was executed for this decision.');
       }

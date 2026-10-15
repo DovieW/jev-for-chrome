@@ -16,6 +16,7 @@ export default defineConfig({
       input: {
         popup: resolve(rootDir, 'popup.html'),
         options: resolve(rootDir, 'options.html'),
+        history: resolve(rootDir, 'history.html'),
         offscreen: resolve(rootDir, 'offscreen.html'),
         microphone: resolve(rootDir, 'microphone.html'),
         background: resolve(rootDir, 'src/background/index.ts'),

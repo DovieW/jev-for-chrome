@@ -15,6 +15,8 @@ import {
 } from '../shared/types';
 import { TrustedInput } from './input';
 import { addBrowserActions, BrowserTab } from '../shared/browser-tabs';
+import { RunHistoryStore, RunRecorder } from './run-history';
+import type { TraceSpan } from '../shared/trace';
 
 /** Semantic fingerprint of an observation: URL, scroll, visible text and the element table. */
 export function computePageFingerprint(snapshot: PageSnapshot): string {
@@ -115,7 +117,9 @@ export class AgentRunner {
   /** Avoid repeating a failed attachment on every decision in a continuous run. */
   private inputAttemptedTab: number | null = null;
 
-  constructor() {
+  private recorder?: RunRecorder;
+
+  constructor(private runHistory = new RunHistoryStore()) {
     this.input.onCancelled = () => {
       if (this.progress.status !== 'running') return;
       this.stop();
@@ -175,6 +179,7 @@ export class AgentRunner {
 
   public setSettings(settings: AppSettings): void {
     this.settings = settings;
+    this.recorder?.addSecrets([settings.openai.apiKey, settings.openrouter.apiKey, settings.typesafe.apiKey, settings.cloudflare.apiToken, settings.textHelper.apiKey].map(key => key.trim()));
     if (this.progress.status !== 'running') {
       this.progress.maxSteps = settings.maxSteps || DEFAULT_SETTINGS.maxSteps;
     }
@@ -185,6 +190,8 @@ export class AgentRunner {
   }
 
   private reset(goal: string, tabId: number): void {
+    this.recorder?.finish('stopped', this.progress.currentStep, 'A new task was started.');
+    this.recorder = new RunRecorder(this.runHistory, { goal, provider: this.settings.activeProvider, model: activeJevModel(this.settings), helperModel: this.settings.textHelper.model, maxSteps: this.settings.maxSteps }, [this.settings.openai.apiKey, this.settings.openrouter.apiKey, this.settings.typesafe.apiKey, this.settings.cloudflare.apiToken, this.settings.textHelper.apiKey].map(key => key.trim()));
     this.runToken++;
     this.activeTabId = tabId;
     this.startTabId = tabId;
@@ -208,6 +215,7 @@ export class AgentRunner {
     this.pendingText = null;
     this.progress = {
       status: 'running',
+      runId: this.recorder.run.id,
       goal,
       currentStep: 0,
       maxSteps: this.settings.maxSteps || DEFAULT_SETTINGS.maxSteps,
@@ -220,7 +228,10 @@ export class AgentRunner {
     this.reset(goal, tabId);
     const token = this.runToken;
     this.broadcastUpdate();
+    const recorder = this.recorder!;
     await this.loop(token);
+    if (token === this.runToken) this.finalizeHistory();
+    await recorder.flush();
   }
 
   /** Executes exactly one step. A new goal, or a finished run, starts over; a paused run continues. */
@@ -238,6 +249,7 @@ export class AgentRunner {
 
     if (this.progress.currentStep >= this.progress.maxSteps) {
       this.finish('blocked', `Reached the ${this.progress.maxSteps}-step budget.`);
+      this.finalizeHistory();
       return;
     }
 
@@ -246,11 +258,15 @@ export class AgentRunner {
     if (token === this.runToken && this.progress.status === 'running') {
       this.progress.status = cont ? 'paused' : 'idle';
     }
+    if (token !== this.runToken) return;
     if (this.progress.status !== 'running') void this.input.detach();
+    this.finalizeHistory();
     this.broadcastUpdate();
+    await this.recorder?.flush();
   }
 
   public stop(): void {
+    this.recorder?.finish('stopped', this.progress.currentStep);
     this.runToken++;
     void this.input.detach();
     if (this.progress.status === 'running' || this.progress.status === 'paused') {
@@ -268,8 +284,10 @@ export class AgentRunner {
       }
       const cont = await this.executeOneStep(token);
       if (!cont) break;
-      if (this.settings.stepDelayMs > 0) {
+      if (token === this.runToken && this.settings.stepDelayMs > 0) {
+        const delay = this.recorder?.span('wait', 'Configured step delay', { delayMs: this.settings.stepDelayMs });
         await new Promise((resolve) => setTimeout(resolve, this.settings.stepDelayMs));
+        delay?.end();
       }
     }
   }
@@ -303,14 +321,14 @@ export class AgentRunner {
   private lastPingError = '';
 
   /** Returns true when this step was a bootstrap navigation, false on a regular page. */
-  private async bootstrap(tabId: number, token: number): Promise<boolean> {
+  private async bootstrap(tabId: number, token: number, trace: TraceSpan): Promise<boolean> {
     const tab = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
     const originalUrl = tab.pendingUrl || tab.url || '';
     const replaceTab = isStartingPage(originalUrl);
     if (!replaceTab && !INTERNAL_PREFIXES.some((prefix) => originalUrl.startsWith(prefix))) return false;
     const started = Date.now();
-    const url = await generateStartingUrl(this.settings, this.progress.goal);
+    const url = await trace.measure('helper', 'Choose starting URL', { goal: this.progress.goal }, span => generateStartingUrl(this.settings, this.progress.goal, span));
     if (token !== this.runToken) return true;
     const current = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
@@ -326,6 +344,7 @@ export class AgentRunner {
     const sourceNow = await chrome.tabs.get(tabId);
     if (token !== this.runToken) return true;
     if ((sourceNow.pendingUrl || sourceNow.url || '') !== originalUrl) throw new Error('The source tab changed while choosing a starting page. Start the task again.');
+    const navigation = trace.child('action', matching ? 'Reuse starting tab' : replaceTab ? 'Navigate blank tab' : 'Open starting tab', { url, sourceTabId: tabId });
     if (matching) {
       const live = await chrome.tabs.get(matching.id!);
       if (token !== this.runToken) return true;
@@ -349,11 +368,12 @@ export class AgentRunner {
       this.inputAttemptedTab = null;
     }
     if (token !== this.runToken) return true;
+    navigation.end({ url, tabId: taskTabId, operation: matching ? 'SWITCH_TAB' : replaceTab ? 'NAVIGATE' : 'OPEN_TAB' });
     this.progress.currentStep++;
     this.history.push({ step: this.progress.currentStep, action: `NAVIGATE ${url}`, kind: 'navigate', url, page_changed: true, outcome: `navigated to ${url}` });
     this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: matching ? 'SWITCH_TAB' : 'NAVIGATE', targetLabel: matching ? 'Reused an open task tab' : replaceTab ? 'Starting URL chosen by text helper' : 'Opened a task tab', targetValue: url, latencyMs: Date.now() - started, provider: this.settings.activeProvider });
     this.broadcastUpdate();
-    await this.waitForTabToLoad(taskTabId);
+    await trace.measure('wait', 'Wait for starting page', { tabId: taskTabId }, () => this.waitForTabToLoad(taskTabId));
     if (token !== this.runToken) return true;
     await this.ensureContentScriptReady(taskTabId);
     return true;
@@ -404,8 +424,24 @@ export class AgentRunner {
    * A stale decision is discarded and the page is observed again without recording a step.
    */
   private async executeOneStep(token: number): Promise<boolean> {
+    const recorder = this.recorder!;
+    const cycle = recorder.span('cycle', `Decision cycle ${recorder.run.nodes.filter(n => n.kind === 'cycle').length + 1}`, { step: this.progress.currentStep + 1, tabId: this.activeTabId });
+    try {
+      const result = await this.executeTracedStep(token, cycle);
+      cycle.end({ continue: result }, token !== this.runToken ? 'cancelled' : this.progress.status === 'error' ? 'error' : 'ok');
+      return result;
+    } catch (error: any) {
+      cycle.fail(error);
+      if (token === this.runToken) this.finish('error', error?.message || String(error));
+      return false;
+    } finally {
+      void recorder.flush();
+    }
+  }
+
+  private async executeTracedStep(token: number, trace: TraceSpan): Promise<boolean> {
     if (token !== this.runToken) return false;
-    await this.followTab();
+    if (this.pendingTab) await trace.measure('wait', 'Follow opened or restored tab', undefined, () => this.followTab());
     if (token !== this.runToken) return false;
     const tabId = this.activeTabId;
     if (tabId === null) {
@@ -414,10 +450,14 @@ export class AgentRunner {
     }
 
     // 1. Observe
+    let observation: TraceSpan | undefined;
     let snapshot: PageSnapshot;
     try {
-      if (await this.bootstrap(tabId, token)) return token === this.runToken;
+      if (await this.bootstrap(tabId, token, trace)) {
+        return token === this.runToken;
+      }
       if (token !== this.runToken) return false;
+      observation = trace.child('observe', 'Read page and prepare input', { tabId });
       await this.ensureContentScriptReady(tabId);
       if (token !== this.runToken) return false;
       if (this.inputAttemptedTab !== tabId) await this.attachInput(tabId);
@@ -427,7 +467,10 @@ export class AgentRunner {
         throw new Error(response?.error || 'Failed to capture page DOM snapshot');
       }
       snapshot = response.snapshot;
+      observation.end({ url: snapshot.url, title: snapshot.title, text: snapshot.text.slice(0, 6000), actions: snapshot.actions.length, omittedActions: snapshot.omitted_actions, input: this.progress.inputNote || 'Trusted input attached' });
     } catch (err: any) {
+      if (observation) observation.fail(err);
+      else trace.event('Page startup failed', { error: err?.message || String(err) }, 'error');
       if (token === this.runToken) this.finish('error', `Page startup / observe failed: ${err?.message || String(err)}`);
       return false;
     }
@@ -455,6 +498,7 @@ export class AgentRunner {
         this.targetFailureCount.clear();
       }
     }
+    if (last?.outcome) trace.event('Previous action outcome', last);
     this.lastFingerprint = fingerprint;
     this.lastSummary = summary;
 
@@ -510,9 +554,14 @@ export class AgentRunner {
     );
     let tabs: BrowserTab[];
     try {
-      const open = await chrome.tabs.query({});
-      tabs = (open || []).filter(tab => tab.id !== undefined && !tab.incognito && /^https?:/.test(tab.pendingUrl || tab.url || ''))
-        .map(tab => ({ id: tab.id!, windowId: tab.windowId, title: (tab.title || '').slice(0, 160), url: tab.pendingUrl || tab.url || '' }));
+      const open = await trace.measure('observe', 'Read open tabs', undefined, async () => {
+        const open = await chrome.tabs.query({});
+        // Only the same eligible metadata that can reach the model belongs in diagnostics.
+        return (open || []).filter(tab => !tab.incognito && /^https?:/.test(tab.pendingUrl || tab.url || ''))
+          .map(tab => ({ id: tab.id, windowId: tab.windowId, title: (tab.title || '').slice(0, 160), url: tab.pendingUrl || tab.url || '' }));
+      });
+      tabs = (open || []).filter(tab => tab.id !== undefined && /^https?:/.test(tab.url || ''))
+        .map(tab => ({ id: tab.id!, windowId: tab.windowId, title: tab.title, url: tab.url }));
     } catch (err: any) {
       this.finish('error', `Could not list open tabs: ${err?.message || String(err)}`);
       return false;
@@ -527,12 +576,15 @@ export class AgentRunner {
     }
 
     const started = Date.now();
+    const decision = trace.child('decision', 'Choose operation and target', request);
     let jevResponse;
     try {
       this.decisionCount++;
-      jevResponse = await callJevProvider(this.settings, request);
+      jevResponse = await callJevProvider(this.settings, request, decision);
+      decision.end(jevResponse);
     } catch (err: any) {
-      this.finish('error', `Decision failed: ${err?.message || String(err)}`);
+      decision.fail(err);
+      if (token === this.runToken) this.finish('error', `Decision failed: ${err?.message || String(err)}`);
       return false;
     }
     const latencyMs = Date.now() - started;
@@ -542,7 +594,7 @@ export class AgentRunner {
     try {
       operationAnswer = validateChoiceAnswer(jevResponse.answers?.operation, actionSpace.operations);
     } catch (err: any) {
-      return this.rejectAnswer(`Invalid operation choice: ${err?.message || String(err)}`);
+      return this.rejectAnswer(`Invalid operation choice: ${err?.message || String(err)}`, trace);
     }
     const operation = operationAnswer.choice;
     const provider = this.settings.activeProvider;
@@ -550,6 +602,7 @@ export class AgentRunner {
     const stuck = readNoul(jevResponse.answers?.stuck);
 
     if (operation === 'DONE' && goalDone !== undefined && goalDone < GOAL_DONE_MIN) {
+      trace.event('DONE rejected by goal check', { goalDone, threshold: GOAL_DONE_MIN, next: 'Observe again with DONE withheld' }, 'skipped');
       this.vetoed = 'DONE';
       this.lastStaleNotice = `ATTENTION: DONE was proposed, but the independent goal check says the task is not achieved yet (probability ${goalDone.toFixed(2)}). Something in the task is still missing; act on it.`;
       this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'DONE (vetoed)', confidence: operationAnswer.confidence, latencyMs, provider, probabilities: operationAnswer.probabilities, goalDone, stuck });
@@ -557,6 +610,7 @@ export class AgentRunner {
       return true;
     }
     if (operation === 'BLOCKED' && stuck !== undefined && stuck < STUCK_MIN && this.history.length < REPEAT_WINDOW) {
+      trace.event('BLOCKED rejected by progress check', { stuck, threshold: STUCK_MIN, next: 'Observe again with BLOCKED withheld' }, 'skipped');
       this.vetoed = 'BLOCKED';
       this.lastStaleNotice = `ATTENTION: BLOCKED was proposed, but the independent progress check does not see a dead end (stuck probability ${stuck.toFixed(2)}). Choose a control that moves toward the task.`;
       this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation: 'BLOCKED (vetoed)', confidence: operationAnswer.confidence, latencyMs, provider, probabilities: operationAnswer.probabilities, goalDone, stuck });
@@ -569,7 +623,7 @@ export class AgentRunner {
         // A hesitant verdict gets one more look after the page settles; only a repeat ends the run.
         this.pendingTerminal = operation;
         this.sendStatus({ text: operation === 'DONE' ? 'Checking whether the task is complete…' : 'Checking for another way forward…', latencyMs });
-        await new Promise((r) => setTimeout(r, 600));
+        await trace.measure('wait', 'Confirm low-confidence verdict', { operation, confidence: operationAnswer.confidence, threshold: TERMINAL_CONFIRM_THRESHOLD }, () => new Promise(r => setTimeout(r, 600)));
         return true;
       }
       this.addLog({
@@ -591,6 +645,7 @@ export class AgentRunner {
     this.pendingTerminal = null;
 
     if (operation === 'OPEN_TAB' || operation === 'SWITCH_TAB') {
+      const navigation = trace.child('action', operation === 'OPEN_TAB' ? 'Open task tab' : 'Switch to open tab');
       try {
         let destination: chrome.tabs.Tab | undefined;
         let targetUrl: string;
@@ -601,17 +656,19 @@ export class AgentRunner {
           const live = await chrome.tabs.get(offered.id);
           if (token !== this.runToken) return false;
           if (live.incognito || (live.pendingUrl || live.url) !== offered.url) {
+            navigation.end({ reason: 'Selected tab URL changed; reconsider navigation' }, 'skipped');
             this.lastStaleNotice = 'The selected tab changed. Reconsider the current open tabs.';
             return true;
           }
           destination = (await chrome.tabs.update(offered.id, { active: true })) || live;
           if (destination?.windowId !== undefined && chrome.windows?.update) await chrome.windows.update(destination.windowId, { focused: true });
         } else {
-          targetUrl = await generateStartingUrl(this.settings, this.progress.goal);
+          targetUrl = await navigation.measure('helper', 'Choose new tab URL', { goal: this.progress.goal }, span => generateStartingUrl(this.settings, this.progress.goal, span));
           if (token !== this.runToken) return false;
           const source = await chrome.tabs.get(tabId);
           if (token !== this.runToken) return false;
           if ((source.pendingUrl || source.url) !== snapshot.url) {
+            navigation.end({ reason: 'Source page changed; reconsider navigation' }, 'skipped');
             this.lastStaleNotice = 'The current page changed while choosing a new tab. Reconsider navigation.';
             return true;
           }
@@ -635,11 +692,13 @@ export class AgentRunner {
         this.history.push({ step: this.progress.currentStep, action: `${operation} ${targetUrl}`, kind: 'navigate', url: targetUrl, page_changed: true, outcome: `${operation === 'SWITCH_TAB' ? 'switched to an open tab' : 'opened a task tab'}: ${targetUrl}` });
         this.addLog({ step: this.progress.currentStep, timestamp: Date.now(), operation, targetLabel: operation === 'SWITCH_TAB' ? 'Switched to an open tab' : 'Opened a task tab', targetValue: targetUrl, latencyMs: Date.now() - started, provider });
         this.broadcastUpdate();
-        await this.waitForTabToLoad(destination.id);
+        navigation.end({ url: targetUrl, tabId: destination.id });
+        await trace.measure('wait', 'Wait for destination page', { tabId: destination.id }, () => this.waitForTabToLoad(destination!.id!));
         if (token !== this.runToken) return false;
         await this.ensureContentScriptReady(destination.id);
         return true;
       } catch (err: any) {
+        navigation.fail(err);
         if (token === this.runToken) this.finish('error', `Tab navigation failed: ${err?.message || String(err)}`);
         return false;
       }
@@ -657,7 +716,7 @@ export class AgentRunner {
         targetAction = actionSpace.targets[operation][targetAnswer.choice];
         targetConfidence = targetAnswer.confidence;
       } catch (err: any) {
-        return this.rejectAnswer(`Invalid target choice: ${err?.message || String(err)}`);
+        return this.rejectAnswer(`Invalid target choice: ${err?.message || String(err)}`, trace);
       }
     } else if (operation in actionSpace.controls) {
       targetAction = actionSpace.controls[operation];
@@ -679,10 +738,12 @@ export class AgentRunner {
       const key = JSON.stringify(context);
       if (this.pendingText && this.pendingText.key === key) {
         generatedText = this.pendingText.text;
+        trace.event('Reused text from the previous attempt', { text: generatedText });
       } else {
         try {
-          generatedText = await generateFieldText(this.settings, context);
+          generatedText = await trace.measure('helper', 'Generate field text', context, span => generateFieldText(this.settings, context, span));
         } catch (err: any) {
+          if (token !== this.runToken) return false;
           const message = err?.message || String(err);
           if (!/nothing typed/i.test(message)) {
             this.finish('error', `Text helper failed: ${message}`);
@@ -708,8 +769,11 @@ export class AgentRunner {
     // 7. Act (never retried)
     this.sendStatus({ text: `${operation} ${targetAction.label}`.slice(0, 120), latencyMs });
     let navigated = false;
+    const action = trace.child('action', `${operation} ${targetAction.label}`, { target: targetAction, text: generatedText });
     try {
-      const result = await this.act(tabId, targetAction, generatedText);
+      const result = await this.act(tabId, targetAction, generatedText, action);
+      action.end(result, result.ok ? 'ok' : 'skipped');
+      if (token !== this.runToken) return false;
       if (!result.ok) {
         if (result.code === 'invalid') {
           this.finish('error', `Act execution failed: ${result.message}`);
@@ -727,16 +791,19 @@ export class AgentRunner {
         this.broadcastUpdate();
         // A covered or vanished target usually means the page is still loading or animating
         // (an in-page sort or filter that swaps the list); give it more time before looking again.
-        await new Promise((r) => setTimeout(r, 500 * this.consecutiveStale));
+        await trace.measure('wait', 'Wait before observing again', { delayMs: 500 * this.consecutiveStale }, () => new Promise(r => setTimeout(r, 500 * this.consecutiveStale)));
         return true; // observe again; nothing was executed
       }
     } catch (err: any) {
+      if (token !== this.runToken) return false;
       const message = err?.message || String(err);
       if (!isNavigationError(message)) {
+        action.fail(err);
         this.finish('error', `Act execution failed: ${message}`);
         return false;
       }
       // The action ran and the page navigated before it could reply; the action still counts.
+      action.end({ navigation: 'Page navigated before replying; action counted' });
       navigated = true;
     }
 
@@ -772,6 +839,7 @@ export class AgentRunner {
     // A click, select or Enter may have started a navigation that only shows up as the tab
     // loading; observing the old document now would hand the model a page that is about to
     // disappear.
+    const settle = trace.child('wait', 'Wait for navigation');
     if (this.pendingTab) {
       await this.followTab();
     } else if (navigated) {
@@ -780,11 +848,13 @@ export class AgentRunner {
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       if (tab?.status === 'loading') await this.waitForTabToLoad(tabId);
     }
+    settle.end();
     return true;
   }
 
   /** An inconsistent model answer is not executed. The first one is simply asked again. */
-  private rejectAnswer(message: string): boolean {
+  private rejectAnswer(message: string, trace: TraceSpan): boolean {
+    trace.event('Invalid model answer', { message, retrying: !this.invalidAnswerRetried }, 'skipped');
     if (!this.invalidAnswerRetried) {
       this.invalidAnswerRetried = true;
       this.lastStaleNotice = null;
@@ -825,15 +895,16 @@ export class AgentRunner {
    * through the DevTools protocol when attached, or with synthetic events otherwise. A
    * trusted dispatch that throws falls back to synthetic on the already prepared target.
    */
-  private async act(tabId: number, action: PageAction, text?: string): Promise<ActResult> {
+  private async act(tabId: number, action: PageAction, text: string | undefined, trace: TraceSpan): Promise<ActResult> {
     if (this.input.attachedTab !== tabId) {
       const result: ActResult | undefined = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_ACT', action, text });
       return result ?? { ok: false, code: 'failed', message: 'No reply from the page.' };
     }
-    const prep: PrepareResult | undefined = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PREPARE', action, text });
+    const prep: PrepareResult | undefined = await trace.measure('action', 'Validate and prepare target', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PREPARE', action, text }));
     if (!prep) return { ok: false, code: 'failed', message: 'No reply from the page.' };
     if (!prep.ok) return prep;
     if (prep.done) return { ok: true, via: 'page' };
+    const dispatch = trace.child('action', 'Dispatch trusted input');
     try {
       if (action.kind === 'click') {
         await this.input.click(prep.x, prep.y);
@@ -843,15 +914,18 @@ export class AgentRunner {
       } else if (action.kind === 'key') {
         await this.input.pressEnter();
       } else {
+        dispatch.end({ kind: action.kind }, 'error');
         return { ok: false, code: 'invalid', message: `Unknown action kind: ${String(action.kind)}` };
       }
+      dispatch.end();
     } catch (err: any) {
+      dispatch.fail(err);
       // The session was lost mid-action (tab navigated away, user cancelled): synthetic events
       // on the target the page already prepared are the closest equivalent.
-      const fallback: ActResult | undefined = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_DISPATCH', action, text });
+      const fallback: ActResult | undefined = await trace.measure('action', 'Fall back to synthetic input', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_DISPATCH', action, text }));
       return fallback ?? { ok: false, code: 'failed', message: err?.message || String(err) };
     }
-    await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_SETTLE' }).catch(() => undefined);
+    await trace.measure('wait', 'Wait for page to settle', undefined, () => chrome.tabs.sendMessage(tabId, { type: 'CONTENT_SETTLE' }).catch(() => undefined));
     return { ok: true, via: 'cdp' };
   }
 
@@ -867,7 +941,15 @@ export class AgentRunner {
     if (status !== 'done') this.sendStatus({ text: message || status });
   }
 
+  private finalizeHistory(): void {
+    const { status, currentStep, lastError } = this.progress;
+    if (status === 'paused' || status === 'running') this.recorder?.update(status, currentStep, lastError);
+    else this.recorder?.finish(status === 'idle' ? 'stopped' : status, currentStep, lastError);
+  }
+
   private broadcastUpdate(): void {
+    const { status, currentStep, lastError } = this.progress;
+    this.recorder?.update(status === 'idle' ? 'stopped' : status, currentStep, lastError);
     try {
       chrome.runtime
         .sendMessage({ type: 'PROGRESS_UPDATE', progress: this.progress })
